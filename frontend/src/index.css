@@ -1,0 +1,17 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  background-color: #ffffff;
+  color: #333;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
