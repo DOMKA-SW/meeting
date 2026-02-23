@@ -11,15 +11,12 @@ const OpenAI = require('openai');
 const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json({ limit: '10mb' }));
+app.use((req, res, next) => { console.log(`${new Date().toISOString()} ${req.method} ${req.path}`); next(); });
 
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
-  next();
-});
-
-app.get('/health', (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString(), hasGroqKey: Boolean(process.env.GROQ_API_KEY) });
-});
+// ─── Config ──────────────────────────────────────────────────────────────────
+const SECTION_SIZE = 12;        // chunks por sección (~18 min con chunks de 90s)
+const WORDS_PER_CHUNK = 2500;   // fallback para texto manual largo
+const SPEAKER_BATCH = 60;       // líneas por batch de speaker improvement
 
 const dbDir = path.join(__dirname, '..', 'storage', 'db');
 const storagePath = path.join(__dirname, '..', 'storage', 'audio');
@@ -29,400 +26,728 @@ fs.mkdirSync(storagePath, { recursive: true });
 
 const db = new sqlite3.Database(dbPath);
 db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS meetings (id TEXT PRIMARY KEY, user_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, cliente TEXT, proyecto TEXT, responsable TEXT, participantes TEXT)`);
-  ['cliente','proyecto','responsable','participantes'].forEach(col => db.run(`ALTER TABLE meetings ADD COLUMN ${col} TEXT`, () => {}));
-  db.run(`CREATE TABLE IF NOT EXISTS chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT, chunk_number INTEGER, file_path TEXT, processed INTEGER DEFAULT 0)`);
-  db.run(`CREATE TABLE IF NOT EXISTS transcriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT, chunk_number INTEGER, speaker TEXT, text TEXT, timestamp TEXT)`);
-  db.run(`CREATE TABLE IF NOT EXISTS actas (id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT UNIQUE, acta_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
-  db.run(`CREATE TABLE IF NOT EXISTS tareas (id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT, tarea_id TEXT, tipo TEXT, descripcion TEXT, responsable TEXT, estado TEXT DEFAULT 'pendiente', fecha_compromiso TEXT)`);
+  db.run(`CREATE TABLE IF NOT EXISTS meetings (
+    id TEXT PRIMARY KEY, user_id TEXT, status TEXT,
+    started_at TEXT, ended_at TEXT, cliente TEXT,
+    proyecto TEXT, responsable TEXT, participantes TEXT
+  )`);
+  ['cliente','proyecto','responsable','participantes'].forEach(col =>
+    db.run(`ALTER TABLE meetings ADD COLUMN ${col} TEXT`, () => {}));
+
+  db.run(`CREATE TABLE IF NOT EXISTS chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT,
+    chunk_number INTEGER, file_path TEXT, processed INTEGER DEFAULT 0
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS transcriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT,
+    chunk_number INTEGER, speaker TEXT, text TEXT, timestamp TEXT
+  )`);
+
+  // Nueva tabla: resúmenes progresivos por sección
+  db.run(`CREATE TABLE IF NOT EXISTS section_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT,
+    section_num INTEGER, from_chunk INTEGER, to_chunk INTEGER,
+    summary_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(meeting_id, section_num)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS actas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT UNIQUE,
+    acta_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS tareas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT, tarea_id TEXT,
+    tipo TEXT, descripcion TEXT, responsable TEXT,
+    estado TEXT DEFAULT 'pendiente', fecha_compromiso TEXT
+  )`);
 });
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-if (!GROQ_API_KEY) console.warn('GROQ_API_KEY no definida');
-else console.log('Groq key:', GROQ_API_KEY.slice(0,10) + '...' + GROQ_API_KEY.slice(-4));
+if (!GROQ_API_KEY) console.warn('⚠️  GROQ_API_KEY no definida');
+else console.log('Groq key:', GROQ_API_KEY.slice(0,10) + '...');
 
 const groq = new OpenAI({ apiKey: GROQ_API_KEY || 'dummy', baseURL: 'https://api.groq.com/openai/v1' });
 const upload = multer({ storage: multer.memoryStorage() });
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const addBusinessDays = (startDate, days) => {
   const date = new Date(startDate);
   let added = 0;
   while (added < days) {
     date.setDate(date.getDate() + 1);
-    const day = date.getDay();
-    if (day !== 0 && day !== 6) added++;
+    if (date.getDay() !== 0 && date.getDay() !== 6) added++;
   }
   return date.toISOString().split('T')[0];
 };
 
-// ─── LLM call con retry ──────────────────────────────────────────────────────
-const callLLM = async (prompt, retries = 2) => {
+// LLM con retry y modelo configurable
+const callLLM = async (prompt, model = 'llama-3.1-8b-instant', retries = 2) => {
   for (let i = 0; i <= retries; i++) {
     try {
       const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
+        model,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
         response_format: { type: 'json_object' }
       });
       return completion.choices?.[0]?.message?.content || null;
     } catch (e) {
-      if (e.status === 429 && i < retries) { console.warn('Rate limit, espera 5s...'); await sleep(5000); }
-      else throw e;
+      if (e.status === 429 && i < retries) {
+        console.warn(`Rate limit, esperando ${(i+1)*5}s...`);
+        await sleep((i+1) * 5000);
+      } else {
+        console.error('LLM error:', e.message);
+        throw e;
+      }
     }
   }
   return null;
 };
 
-// ─── Mejora de speakers en lotes ─────────────────────────────────────────────
-const improveSpeakersWithLLM = async (transcriptions, participantes = []) => {
-  if (!GROQ_API_KEY || transcriptions.length === 0) return transcriptions;
-  const BATCH = 80;
-  const result = [...transcriptions];
-  for (let start = 0; start < transcriptions.length; start += BATCH) {
-    const batch = transcriptions.slice(start, start + BATCH);
-    const rawLines = batch.map((t, i) => `[${start + i}]: ${t.text}`).join('\n');
-    const hint = participantes.length > 0 ? `\nParticipantes conocidos: ${participantes.join(', ')}. Usa sus nombres si puedes inferirlos.` : '';
-    const prompt = `Analiza esta transcripción y asigna quién habla en cada línea.${hint}
+const parseJSON = (raw) => {
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (_) {
+    const m = raw.match(/\{[\s\S]*\}/);
+    try { return m ? JSON.parse(m[0]) : null; } catch (_) { return null; }
+  }
+};
 
-Identifica cambios de speaker por: patrones pregunta-respuesta, cambios de tema, referencias ("como dijo Juan"), cambios de rol.
+// ─── Speaker Improvement (modelo rápido, por sección) ─────────────────────────
+const improveSpeakersInSection = async (transcriptions, participantes = [], speakerRegistry = {}) => {
+  if (!GROQ_API_KEY || transcriptions.length === 0) return transcriptions;
+
+  const result = [...transcriptions];
+  const knownNames = Object.values(speakerRegistry).filter(v => v && !v.startsWith('Speaker'));
+  const hint = participantes.length > 0
+    ? `Participantes conocidos: ${participantes.join(', ')}.`
+    : knownNames.length > 0
+      ? `Speakers identificados hasta ahora: ${knownNames.join(', ')}.`
+      : '';
+
+  for (let start = 0; start < transcriptions.length; start += SPEAKER_BATCH) {
+    const batch = transcriptions.slice(start, start + SPEAKER_BATCH);
+    const lines = batch.map((t, i) => `[${start + i}]: ${t.text}`).join('\n');
+
+    const prompt = `Eres un experto en diarización de reuniones. ${hint}
+
+Asigna quién habla en cada línea numerada. Detecta cambios de speaker por:
+- Preguntas y respuestas (distintos speakers)
+- Cambios de perspectiva o tema
+- Referencias a otros ("como dijo X...", "¿Y tú qué opinas?")
+- Cambios de rol (quien dirige vs quien reporta)
 
 REGLAS:
-- Usa nombre real del participante si puedes inferirlo, si no usa Speaker1, Speaker2... (consistente)
-- Responde SOLO con JSON: {"lines": [{"index": N, "speaker": "Nombre", "text": "texto"}]}
+- Si puedes inferir el nombre real del participante, úsalo
+- Si no, usa Speaker1, Speaker2, etc. (CONSISTENTE con speakers previos si los conoces)
+- NO inventes nombres que no estén en el audio
+
+Responde SOLO JSON: {"lines": [{"index": N, "speaker": "Nombre"}]}
 
 Transcripción:
-${rawLines}`;
+${lines}`;
+
     try {
-      const raw = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1,
-        response_format: { type: 'json_object' }
-      });
-      const parsed = JSON.parse(raw.choices?.[0]?.message?.content || '{}');
-      const lines = Array.isArray(parsed.lines) ? parsed.lines : [];
-      for (const line of lines) {
+      const raw = await callLLM(prompt, 'llama-3.1-8b-instant');
+      const parsed = parseJSON(raw);
+      const linesOut = Array.isArray(parsed?.lines) ? parsed.lines : [];
+      for (const line of linesOut) {
         if (line.index >= 0 && line.index < result.length && line.speaker) {
-          result[line.index] = { ...result[line.index], speaker: line.speaker, text: line.text || result[line.index].text };
+          result[line.index] = { ...result[line.index], speaker: line.speaker };
+          // Actualizar registry
+          const origSpeaker = transcriptions[line.index]?.speaker;
+          if (origSpeaker && !speakerRegistry[origSpeaker]) {
+            speakerRegistry[origSpeaker] = line.speaker;
+          }
         }
       }
     } catch (e) {
-      console.warn(`Speaker improvement batch ${start} falló:`, e.message);
+      console.warn(`Speaker batch ${start} falló:`, e.message);
     }
   }
   return result;
 };
 
-// ─── Extracción de una sección (para reuniones largas) ───────────────────────
-const extractFromSection = async (sectionText, num, total) => {
-  const prompt = `Analiza SECCIÓN ${num}/${total} de una transcripción de reunión.
+// ─── Resumen de Sección (modelo rápido) ──────────────────────────────────────
+const generateSectionSummary = async (meetingId, sectionNum, fromChunk, toChunk) => {
+  return new Promise((resolve) => {
+    db.all(
+      `SELECT t.id, t.speaker, t.text, t.chunk_number
+       FROM transcriptions t
+       WHERE t.meeting_id = ? AND t.chunk_number >= ? AND t.chunk_number <= ?
+       ORDER BY t.chunk_number, t.id`,
+      [meetingId, fromChunk, toChunk],
+      async (err, transcriptions) => {
+        if (err || transcriptions.length === 0) return resolve(null);
 
-Extrae en JSON:
+        // Obtener participantes del meeting
+        db.get('SELECT participantes FROM meetings WHERE id = ?', [meetingId], async (_, meeting) => {
+          let participantes = [];
+          try { participantes = JSON.parse(meeting?.participantes || '[]'); } catch(_) {}
+
+          // Mejorar speakers en esta sección
+          const improved = await improveSpeakersInSection(transcriptions, participantes);
+
+          // Guardar speakers mejorados
+          for (let i = 0; i < improved.length; i++) {
+            if (improved[i].speaker !== transcriptions[i].speaker) {
+              db.run('UPDATE transcriptions SET speaker = ? WHERE id = ?',
+                [improved[i].speaker, transcriptions[i].id]);
+            }
+          }
+
+          const transcript = improved.map(t => `[${t.speaker}]: ${t.text}`).join('\n');
+          const sectionMinStart = fromChunk * 1.5; // aprox minutos (chunks de 90s)
+          const sectionMinEnd = (toChunk + 1) * 1.5;
+
+          const prompt = `Analiza la sección ${sectionNum} (min ~${Math.round(sectionMinStart)}-${Math.round(sectionMinEnd)}) de esta reunión.
+
+Extrae en JSON COMPACTO solo lo verdaderamente importante:
 {
-  "temas_tratados": ["tema1"],
-  "decisiones": ["decisión1"],
-  "tareas_mencionadas": [{"descripcion": "...", "responsable": "nombre o vacío", "fecha": "fecha o vacío"}],
-  "resumen_breve": "2-3 frases"
+  "temas": ["tema breve 1", "tema breve 2"],
+  "decisiones": ["decisión concreta tomada"],
+  "tareas": [
+    {"tarea": "descripción específica y accionable", "quien": "nombre o vacío", "cuando": "fecha mencionada o vacío"}
+  ],
+  "resumen": "2-3 frases densas con el núcleo de esta sección"
 }
 
-CRÍTICO para tareas: solo tareas EXPLÍCITAS y CONCRETAS. NO genéricas como "revisar", "mejorar".
+CRÍTICO para tareas:
+- SOLO compromisos EXPLÍCITOS: "Juan va a enviar X el viernes", "María prepara el documento"
+- NUNCA tareas vagas: "revisar", "mejorar", "continuar", "seguir trabajando"
+- Si no hay tareas concretas, deja el array vacío
 
-Sección:
-${sectionText}
+Transcripción:
+${transcript}
 
 Responde SOLO JSON válido.`;
-  try {
-    const content = await callLLM(prompt);
-    return content ? JSON.parse(content) : null;
-  } catch (e) {
-    console.warn(`Error sección ${num}:`, e.message);
-    return null;
-  }
+
+          try {
+            const raw = await callLLM(prompt, 'llama-3.1-8b-instant');
+            const summary = parseJSON(raw);
+            if (summary) {
+              db.run(
+                `INSERT OR REPLACE INTO section_summaries
+                 (meeting_id, section_num, from_chunk, to_chunk, summary_json)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [meetingId, sectionNum, fromChunk, toChunk, JSON.stringify(summary)],
+                () => {
+                  console.log(`[${meetingId}] Sección ${sectionNum} resumida (chunks ${fromChunk}-${toChunk})`);
+                  resolve(summary);
+                }
+              );
+            } else resolve(null);
+          } catch (e) {
+            console.error(`Error resumen sección ${sectionNum}:`, e.message);
+            resolve(null);
+          }
+        });
+      }
+    );
+  });
 };
 
-// ─── Merge final de extractos (map-reduce) ───────────────────────────────────
-const mergeAndGenerateActa = async (extracts, meta, fechaDefault) => {
-  const allTemas = [...new Set(extracts.flatMap(e => e?.temas_tratados || []))];
-  const allDecisiones = [...new Set(extracts.flatMap(e => e?.decisiones || []))];
-  const allTareas = extracts.flatMap(e => e?.tareas_mencionadas || []);
-  const resumenes = extracts.map((e, i) => `Parte ${i+1}: ${e?.resumen_breve || ''}`).join('\n');
+// Verificar si toca generar sección tras procesar un chunk
+const checkAndTriggerSectionSummary = (meetingId) => {
+  db.get(
+    `SELECT COUNT(*) as cnt FROM chunks WHERE meeting_id = ? AND processed = 1`,
+    [meetingId],
+    (err, row) => {
+      const processed = row?.cnt || 0;
+      if (processed > 0 && processed % SECTION_SIZE === 0) {
+        const sectionNum = Math.floor(processed / SECTION_SIZE);
+        const fromChunk = (sectionNum - 1) * SECTION_SIZE;
+        const toChunk = sectionNum * SECTION_SIZE - 1;
+        // Solo si no existe ya
+        db.get(
+          `SELECT id FROM section_summaries WHERE meeting_id = ? AND section_num = ?`,
+          [meetingId, sectionNum],
+          (_, existing) => {
+            if (!existing) {
+              console.log(`[${meetingId}] Disparando resumen sección ${sectionNum} (chunks ${fromChunk}-${toChunk})`);
+              generateSectionSummary(meetingId, sectionNum, fromChunk, toChunk)
+                .catch(e => console.error('Error sección:', e.message));
+            }
+          }
+        );
+      }
+    }
+  );
+};
 
-  const prompt = `Genera acta final en JSON a partir de estos extractos consolidados.
+// ─── Generación de Acta Final (combina secciones) ───────────────────────────
+const generateActaFromSections = async (meetingId, meta, fechaDefault) => {
+  return new Promise((resolve, reject) => {
+    // Obtener todos los resúmenes de sección
+    db.all(
+      `SELECT section_num, from_chunk, to_chunk, summary_json
+       FROM section_summaries WHERE meeting_id = ? ORDER BY section_num`,
+      [meetingId],
+      async (err, sections) => {
+        if (err) return reject(err);
 
-DATOS DE IDENTIFICACIÓN (usa EXACTAMENTE):
+        let actaJson = null;
+
+        if (sections.length > 0) {
+          // Combinar secciones en input compacto para LLM
+          const sectionInputs = sections.map((s, i) => {
+            const sum = parseJSON(s.summary_json) || {};
+            const minStart = Math.round(s.from_chunk * 1.5);
+            const minEnd = Math.round((s.to_chunk + 1) * 1.5);
+            return `--- SECCIÓN ${i+1} (min ${minStart}-${minEnd}) ---
+Temas: ${(sum.temas || []).join(', ')}
+Decisiones: ${(sum.decisiones || []).join('; ')}
+Tareas: ${JSON.stringify(sum.tareas || [])}
+Resumen: ${sum.resumen || ''}`;
+          }).join('\n\n');
+
+          const allTareas = sections.flatMap(s => {
+            const sum = parseJSON(s.summary_json) || {};
+            return (sum.tareas || []).map(t => ({
+              descripcion: t.tarea || t.descripcion || '',
+              responsable: t.quien || t.responsable || '',
+              fecha_compromiso: t.cuando || t.fecha_compromiso || ''
+            }));
+          });
+
+          const prompt = `Genera el acta final de esta reunión combinando los resúmenes de ${sections.length} secciones.
+
+DATOS DE IDENTIFICACIÓN (usa EXACTAMENTE estos):
 cliente="${meta.cliente}", proyecto="${meta.proyecto}", responsable="${meta.responsable}",
 participantes=${JSON.stringify(meta.participantes)}, fecha="${meta.fecha}",
 hora_inicio="${meta.hora_inicio}", hora_fin="${meta.hora_fin}"
 
-TEMAS: ${allTemas.join(' | ')}
-DECISIONES: ${allDecisiones.join(' | ')}
-RESÚMENES: ${resumenes}
-TAREAS IDENTIFICADAS: ${JSON.stringify(allTareas)}
+RESÚMENES POR SECCIÓN:
+${sectionInputs}
 
-JSON requerido:
+TODAS LAS TAREAS IDENTIFICADAS (consolida duplicados):
+${JSON.stringify(allTareas, null, 2)}
+
+Genera JSON:
 {
-  "identificacion": {"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},
+  "identificacion": {
+    "cliente": "", "proyecto": "", "fecha": "", "hora_inicio": "",
+    "hora_fin": "", "responsable": "", "participantes": []
+  },
   "tareas_anteriores": [],
-  "tareas_nuevas": [{"id":"tarea_1","descripcion":"","responsable":"","fecha_compromiso":"${fechaDefault}"}],
-  "resumen_reunion": "",
+  "tareas_nuevas": [
+    {"id": "tarea_1", "descripcion": "descripción clara", "responsable": "nombre", "fecha_compromiso": "${fechaDefault}"}
+  ],
+  "resumen_reunion": "Resumen fluido y coherente de toda la reunión en 4-6 frases, capturando objetivos, temas tratados y conclusiones principales.",
   "observaciones_generales": ""
 }
 
-REGLAS tareas_nuevas:
-- Consolida duplicados en una sola tarea
-- Solo tareas REALES y ESPECÍFICAS, máximo 15
-- IDs secuenciales: tarea_1, tarea_2...
-- fecha_compromiso: fecha mencionada o "${fechaDefault}"
+REGLAS CRÍTICAS:
+1. resumen_reunion: narrativo y útil, no una lista. Captura el arco completo de la reunión.
+2. tareas_nuevas:
+   - CONSOLIDA tareas similares en una sola
+   - ELIMINA duplicados entre secciones
+   - SOLO tareas específicas y accionables (NO "revisar", "mejorar", "continuar")
+   - fecha_compromiso: usa fecha mencionada o "${fechaDefault}"
+   - IDs secuenciales: tarea_1, tarea_2...
+   - Máximo 15 tareas, prioriza las más importantes
+3. tareas_anteriores: solo si se mencionaron explícitamente tareas de reuniones previas
 
 Responde SOLO JSON válido.`;
 
-  const content = await callLLM(prompt);
-  if (!content) return null;
-  try { return JSON.parse(content); }
-  catch (e) { const m = content.match(/\{[\s\S]*\}/); return m ? JSON.parse(m[0]) : null; }
-};
-
-// ─── Acta en una pasada (reuniones cortas) ────────────────────────────────────
-const generateActaSinglePass = async (fullTranscript, meta, fechaDefault) => {
-  const prompt = `Genera acta de reunión en JSON. Usa OBLIGATORIAMENTE estos datos:
-cliente="${meta.cliente}", proyecto="${meta.proyecto}", responsable="${meta.responsable}",
-participantes=${JSON.stringify(meta.participantes)}, fecha="${meta.fecha}",
-hora_inicio="${meta.hora_inicio}", hora_fin="${meta.hora_fin}".
-
-{
-  "identificacion": {"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},
-  "tareas_anteriores": [],
-  "tareas_nuevas": [{"id":"tarea_1","descripcion":"","responsable":"","fecha_compromiso":"${fechaDefault}"}],
-  "resumen_reunion": "",
-  "observaciones_generales": ""
-}
-
-REGLAS tareas_nuevas:
-- Solo tareas REALES y ESPECÍFICAS de la transcripción
-- NO genéricas ("revisar", "mejorar", "seguir trabajando")
-- Combina duplicados, máximo 15, IDs secuenciales
-- fecha_compromiso: fecha mencionada o "${fechaDefault}"
-
-Transcripción:
-${fullTranscript}
-
-Responde SOLO JSON válido.`;
-
-  const content = await callLLM(prompt);
-  if (!content) return null;
-  try { return JSON.parse(content); }
-  catch (e) { const m = content.match(/\{[\s\S]*\}/); return m ? JSON.parse(m[0]) : null; }
-};
-
-// ─── Función principal de generación de acta ─────────────────────────────────
-const WORDS_PER_CHUNK = 2500;
-
-const generateActaIfReady = async (meetingId) => {
-  return new Promise((resolve, reject) => {
-    db.get('SELECT cliente, proyecto, responsable, participantes, started_at, ended_at FROM meetings WHERE id = ?', [meetingId], (errMeet, meeting) => {
-      if (errMeet || !meeting) return reject(errMeet || new Error('Meeting not found'));
-      db.all('SELECT id, text, speaker, chunk_number FROM transcriptions WHERE meeting_id = ? ORDER BY chunk_number, id', [meetingId], async (err, transcriptions) => {
-        if (err) return reject(err);
-        if (transcriptions.length === 0) return resolve(null);
-
-        let participantesArr = [];
-        try { participantesArr = JSON.parse(meeting.participantes || '[]'); } catch (_) {}
-
-        console.log(`[${meetingId}] Mejorando speakers (${transcriptions.length} segmentos)...`);
-        const improved = await improveSpeakersWithLLM(transcriptions, participantesArr);
-
-        for (let i = 0; i < improved.length; i++) {
-          const imp = improved[i], orig = transcriptions[i];
-          if (orig.id && (imp.speaker !== orig.speaker || imp.text !== orig.text)) {
-            db.run('UPDATE transcriptions SET speaker = ?, text = ? WHERE id = ?', [imp.speaker, imp.text, orig.id]);
+          try {
+            const raw = await callLLM(prompt, 'llama-3.3-70b-versatile');
+            actaJson = parseJSON(raw);
+          } catch (e) {
+            console.error(`Error acta desde secciones:`, e.message);
           }
         }
 
-        const fullTranscript = improved.map(t => `[${t.speaker}]: ${t.text}`).join('\n');
-        const wordCount = fullTranscript.split(/\s+/).length;
-        const startedDate = meeting.started_at ? new Date(meeting.started_at) : null;
-        const endedDate = meeting.ended_at ? new Date(meeting.ended_at) : null;
-        const meta = {
-          cliente: meeting.cliente || '', proyecto: meeting.proyecto || '',
-          responsable: meeting.responsable || '', participantes: participantesArr,
-          fecha: startedDate ? startedDate.toISOString().split('T')[0] : '',
-          hora_inicio: startedDate ? `${String(startedDate.getHours()).padStart(2,'0')}:${String(startedDate.getMinutes()).padStart(2,'0')}` : '',
-          hora_fin: endedDate ? `${String(endedDate.getHours()).padStart(2,'0')}:${String(endedDate.getMinutes()).padStart(2,'0')}` : ''
-        };
-        const fechaDefault = addBusinessDays(meta.fecha || new Date().toISOString().split('T')[0], 3);
-
-        let actaJson = null;
-        try {
-          if (wordCount > WORDS_PER_CHUNK) {
-            console.log(`[${meetingId}] Transcript largo (${wordCount} palabras) - usando map-reduce...`);
-            const words = fullTranscript.split(/\s+/);
-            const sections = [];
-            for (let i = 0; i < words.length; i += WORDS_PER_CHUNK) sections.push(words.slice(i, i + WORDS_PER_CHUNK).join(' '));
-            console.log(`[${meetingId}] ${sections.length} secciones a procesar`);
-            const extracts = [];
-            for (let i = 0; i < sections.length; i++) {
-              const extract = await extractFromSection(sections[i], i + 1, sections.length);
-              if (extract) extracts.push(extract);
-              if (i < sections.length - 1) await sleep(1500);
-            }
-            actaJson = await mergeAndGenerateActa(extracts, meta, fechaDefault);
-          } else {
-            console.log(`[${meetingId}] Transcript normal (${wordCount} palabras) - acta directa`);
-            actaJson = await generateActaSinglePass(fullTranscript, meta, fechaDefault);
-          }
-        } catch (error) {
-          console.error(`[${meetingId}] Error generando acta:`, error.message);
+        // Si no hay secciones o falló, intentar desde transcripción cruda
+        if (!actaJson) {
+          console.log(`[${meetingId}] Fallback: generando acta desde transcripción...`);
+          actaJson = await generateActaFromRawTranscript(meetingId, meta, fechaDefault);
         }
 
         if (!actaJson) {
           actaJson = {
             identificacion: { ...meta },
             tareas_anteriores: [], tareas_nuevas: [],
-            resumen_reunion: 'Error al generar acta. Revisa la transcripción.',
+            resumen_reunion: 'No se pudo generar el acta automáticamente.',
             observaciones_generales: ''
           };
         }
-        // Forzar datos de identificación correctos siempre
-        actaJson.identificacion = { ...meta };
 
-        db.run('INSERT OR REPLACE INTO actas (meeting_id, acta_json) VALUES (?, ?)', [meetingId, JSON.stringify(actaJson)], function (err) {
-          if (err) return reject(err);
-          db.run('DELETE FROM tareas WHERE meeting_id = ?', [meetingId], () => {
-            if (Array.isArray(actaJson.tareas_nuevas) && actaJson.tareas_nuevas.length > 0) {
-              const seen = new Set();
-              let counter = 1;
-              actaJson.tareas_nuevas.filter(t => {
-                const desc = (t.descripcion || '').trim().toLowerCase();
-                if (!desc || desc.length < 5 || seen.has(desc)) return false;
-                seen.add(desc); return true;
-              }).forEach(tarea => {
-                db.run('INSERT INTO tareas (meeting_id, tarea_id, tipo, descripcion, responsable, estado, fecha_compromiso) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                  [meetingId, `tarea_${counter++}`, 'nueva', (tarea.descripcion||'').trim(), (tarea.responsable||'').trim(), 'pendiente', tarea.fecha_compromiso || fechaDefault]);
-              });
-            }
-          });
-          console.log(`[${meetingId}] Acta lista con ${actaJson.tareas_nuevas?.length||0} tareas.`);
-          resolve(actaJson);
-        });
-      });
-    });
+        // Forzar identificación correcta
+        actaJson.identificacion = { ...meta };
+        resolve(actaJson);
+      }
+    );
   });
 };
 
+// Fallback: acta desde transcripción cruda (para reuniones cortas sin secciones)
+const generateActaFromRawTranscript = async (meetingId, meta, fechaDefault) => {
+  return new Promise((resolve) => {
+    db.all(
+      `SELECT speaker, text, chunk_number FROM transcriptions
+       WHERE meeting_id = ? ORDER BY chunk_number, id`,
+      [meetingId],
+      async (err, rows) => {
+        if (err || rows.length === 0) return resolve(null);
+
+        const fullTranscript = rows.map(t => `[${t.speaker}]: ${t.text}`).join('\n');
+        const wordCount = fullTranscript.split(/\s+/).length;
+
+        let prompt;
+        if (wordCount > WORDS_PER_CHUNK) {
+          // Map-reduce para transcripciones largas sin secciones previas
+          const words = fullTranscript.split(/\s+/);
+          const sectionTexts = [];
+          for (let i = 0; i < words.length; i += WORDS_PER_CHUNK) {
+            sectionTexts.push(words.slice(i, i + WORDS_PER_CHUNK).join(' '));
+          }
+
+          const extracts = [];
+          for (let i = 0; i < sectionTexts.length; i++) {
+            const raw = await callLLM(
+              `Extrae de esta sección de reunión en JSON: {"temas": [], "tareas": [{"tarea":"","quien":"","cuando":""}], "resumen": ""}
+
+Sección:
+${sectionTexts[i]}
+
+SOLO JSON válido.`,
+              'llama-3.1-8b-instant'
+            ).catch(() => null);
+            if (raw) { const p = parseJSON(raw); if (p) extracts.push(p); }
+            if (i < sectionTexts.length - 1) await sleep(1500);
+          }
+
+          const allTareas = extracts.flatMap(e => e.tareas || []);
+          const resumenes = extracts.map((e,i) => `Parte ${i+1}: ${e.resumen||''}`).join('\n');
+
+          prompt = `Genera acta de reunión en JSON.
+IDENTIFICACIÓN (usa exactamente): cliente="${meta.cliente}", proyecto="${meta.proyecto}", responsable="${meta.responsable}", participantes=${JSON.stringify(meta.participantes)}, fecha="${meta.fecha}", hora_inicio="${meta.hora_inicio}", hora_fin="${meta.hora_fin}"
+
+RESÚMENES: ${resumenes}
+TAREAS IDENTIFICADAS: ${JSON.stringify(allTareas)}
+
+JSON: {"identificacion":{...},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_1","descripcion":"","responsable":"","fecha_compromiso":"${fechaDefault}"}],"resumen_reunion":"","observaciones_generales":""}
+
+REGLAS tareas: consolida duplicados, máximo 15, solo concretas y específicas.
+SOLO JSON válido.`;
+        } else {
+          prompt = `Genera acta de reunión en JSON.
+IDENTIFICACIÓN (usa exactamente): cliente="${meta.cliente}", proyecto="${meta.proyecto}", responsable="${meta.responsable}", participantes=${JSON.stringify(meta.participantes)}, fecha="${meta.fecha}", hora_inicio="${meta.hora_inicio}", hora_fin="${meta.hora_fin}"
+
+JSON: {"identificacion":{...},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_1","descripcion":"","responsable":"","fecha_compromiso":"${fechaDefault}"}],"resumen_reunion":"","observaciones_generales":""}
+
+REGLAS tareas:
+- SOLO tareas EXPLÍCITAS y CONCRETAS del texto
+- NO genéricas ("revisar", "mejorar"). Máximo 15, IDs secuenciales.
+- fecha_compromiso: fecha mencionada o "${fechaDefault}"
+
+Transcripción:
+${fullTranscript}
+
+SOLO JSON válido.`;
+        }
+
+        try {
+          const raw = await callLLM(prompt, 'llama-3.3-70b-versatile');
+          resolve(parseJSON(raw));
+        } catch (e) {
+          console.error('Error acta raw:', e.message);
+          resolve(null);
+        }
+      }
+    );
+  });
+};
+
+// ─── Función principal de post-proceso al terminar reunión ─────────────────────
+const finalizeMeeting = async (meetingId) => {
+  db.get(
+    `SELECT cliente, proyecto, responsable, participantes, started_at, ended_at FROM meetings WHERE id = ?`,
+    [meetingId],
+    async (err, meeting) => {
+      if (err || !meeting) return;
+
+      let participantes = [];
+      try { participantes = JSON.parse(meeting.participantes || '[]'); } catch(_) {}
+
+      // Esperar a que terminen los chunks en vuelo (máx 30s)
+      let waited = 0;
+      while (waited < 30000) {
+        const pending = await new Promise(resolve =>
+          db.get('SELECT COUNT(*) as cnt FROM chunks WHERE meeting_id = ? AND processed = 0',
+            [meetingId], (_, r) => resolve(r?.cnt || 0)));
+        if (pending === 0) break;
+        await sleep(2000);
+        waited += 2000;
+      }
+
+      // Generar sección final con los chunks restantes no cubiertos por secciones previas
+      const lastSectionRow = await new Promise(resolve =>
+        db.get('SELECT MAX(to_chunk) as lastCovered FROM section_summaries WHERE meeting_id = ?',
+          [meetingId], (_, r) => resolve(r)));
+      const lastCovered = lastSectionRow?.lastCovered ?? -1;
+
+      const lastChunkRow = await new Promise(resolve =>
+        db.get('SELECT MAX(chunk_number) as lastChunk FROM chunks WHERE meeting_id = ? AND processed = 1',
+          [meetingId], (_, r) => resolve(r)));
+      const lastChunk = lastChunkRow?.lastChunk;
+
+      if (lastChunk !== null && lastChunk !== undefined && lastChunk > lastCovered) {
+        // Hay chunks sin cubrir → generar sección final
+        const sectionsCount = await new Promise(resolve =>
+          db.get('SELECT COUNT(*) as cnt FROM section_summaries WHERE meeting_id = ?',
+            [meetingId], (_, r) => resolve(r?.cnt || 0)));
+
+        console.log(`[${meetingId}] Generando sección final (chunks ${lastCovered+1}-${lastChunk})`);
+        await generateSectionSummary(meetingId, sectionsCount + 1, lastCovered + 1, lastChunk);
+      }
+
+      // Construir meta
+      const startedDate = meeting.started_at ? new Date(meeting.started_at) : null;
+      const endedDate = meeting.ended_at ? new Date(meeting.ended_at) : null;
+      const meta = {
+        cliente: meeting.cliente || '',
+        proyecto: meeting.proyecto || '',
+        responsable: meeting.responsable || '',
+        participantes,
+        fecha: startedDate ? startedDate.toISOString().split('T')[0] : '',
+        hora_inicio: startedDate
+          ? `${String(startedDate.getHours()).padStart(2,'0')}:${String(startedDate.getMinutes()).padStart(2,'0')}`
+          : '',
+        hora_fin: endedDate
+          ? `${String(endedDate.getHours()).padStart(2,'0')}:${String(endedDate.getMinutes()).padStart(2,'0')}`
+          : ''
+      };
+      const fechaDefault = addBusinessDays(meta.fecha || new Date().toISOString().split('T')[0], 3);
+
+      // Generar acta final
+      console.log(`[${meetingId}] Generando acta final...`);
+      const actaJson = await generateActaFromSections(meetingId, meta, fechaDefault);
+      actaJson.identificacion = { ...meta };
+
+      // Guardar acta
+      db.run('INSERT OR REPLACE INTO actas (meeting_id, acta_json) VALUES (?, ?)',
+        [meetingId, JSON.stringify(actaJson)]);
+
+      // Guardar tareas
+      db.run('DELETE FROM tareas WHERE meeting_id = ?', [meetingId], () => {
+        const seen = new Set();
+        let counter = 1;
+        (actaJson.tareas_nuevas || [])
+          .filter(t => {
+            const desc = (t.descripcion || '').trim().toLowerCase();
+            if (!desc || desc.length < 8 || seen.has(desc)) return false;
+            seen.add(desc); return true;
+          })
+          .forEach(t => {
+            db.run(
+              'INSERT INTO tareas (meeting_id, tarea_id, tipo, descripcion, responsable, estado, fecha_compromiso) VALUES (?, ?, ?, ?, ?, ?, ?)',
+              [meetingId, `tarea_${counter++}`, 'nueva',
+               (t.descripcion||'').trim(), (t.responsable||'').trim(),
+               'pendiente', t.fecha_compromiso || fechaDefault]
+            );
+          });
+      });
+
+      console.log(`[${meetingId}] ✅ Acta lista. ${actaJson.tareas_nuevas?.length||0} tareas.`);
+    }
+  );
+};
+
 // ─── Transcripción Whisper ────────────────────────────────────────────────────
-const processChunkWithWhisper = async (filePath, meetingId, chunkNumber) => {
-  if (!GROQ_API_KEY) { db.run('UPDATE chunks SET processed = 2 WHERE meeting_id = ? AND chunk_number = ?', [meetingId, chunkNumber]); return null; }
+const processChunkWithWhisper = async (filePath, meetingId, chunkNumber, participantes = []) => {
+  if (!GROQ_API_KEY) {
+    db.run('UPDATE chunks SET processed = 2 WHERE meeting_id = ? AND chunk_number = ?', [meetingId, chunkNumber]);
+    return null;
+  }
   try {
+    // Prompt para Whisper: ayuda con nombres propios y contexto
+    const whisperPrompt = participantes.length > 0
+      ? `Reunión de trabajo. Participantes: ${participantes.join(', ')}.`
+      : 'Reunión de trabajo en español.';
+
     const transcription = await groq.audio.transcriptions.create({
-      file: fs.createReadStream(filePath), model: 'whisper-large-v3-turbo', response_format: 'verbose_json'
+      file: fs.createReadStream(filePath),
+      model: 'whisper-large-v3-turbo',
+      response_format: 'verbose_json',
+      language: 'es',          // Hint de idioma → más preciso y rápido
+      prompt: whisperPrompt    // Ayuda con nombres propios
     });
+
     const segments = Array.isArray(transcription.segments) ? transcription.segments : [];
     if (segments.length > 0) {
-      let speakerCounter = 1; const speakerMap = {};
-      for (const segment of segments) {
-        const key = segment.spk || segment.speaker || 'speaker';
-        if (!speakerMap[key]) speakerMap[key] = `speaker${speakerCounter++}`;
-        db.run('INSERT INTO transcriptions (meeting_id, chunk_number, speaker, text, timestamp) VALUES (?, ?, ?, ?, ?)',
-          [meetingId, chunkNumber, speakerMap[key], segment.text || '', new Date().toISOString()]);
+      let speakerCounter = 1;
+      const speakerMap = {};
+      for (const seg of segments) {
+        const key = seg.spk || seg.speaker || 'speaker';
+        if (!speakerMap[key]) speakerMap[key] = `Speaker${speakerCounter++}`;
+        if ((seg.text || '').trim()) {
+          db.run(
+            'INSERT INTO transcriptions (meeting_id, chunk_number, speaker, text, timestamp) VALUES (?, ?, ?, ?, ?)',
+            [meetingId, chunkNumber, speakerMap[key], seg.text.trim(), new Date().toISOString()]
+          );
+        }
       }
-    } else if (transcription.text) {
-      db.run('INSERT INTO transcriptions (meeting_id, chunk_number, speaker, text, timestamp) VALUES (?, ?, ?, ?, ?)',
-        [meetingId, chunkNumber, 'speaker1', transcription.text, new Date().toISOString()]);
+    } else if (transcription.text?.trim()) {
+      db.run(
+        'INSERT INTO transcriptions (meeting_id, chunk_number, speaker, text, timestamp) VALUES (?, ?, ?, ?, ?)',
+        [meetingId, chunkNumber, 'Speaker1', transcription.text.trim(), new Date().toISOString()]
+      );
     }
-    db.run('UPDATE chunks SET processed = 1 WHERE meeting_id = ? AND chunk_number = ?', [meetingId, chunkNumber]);
-    // NO generar acta aquí - solo al endMeeting
+
+    db.run('UPDATE chunks SET processed = 1 WHERE meeting_id = ? AND chunk_number = ?',
+      [meetingId, chunkNumber], () => {
+        // Verificar si toca generar resumen de sección
+        checkAndTriggerSectionSummary(meetingId);
+      });
+
     return transcription;
   } catch (error) {
-    if (error.status === 429) { db.run('UPDATE chunks SET processed = 2 WHERE meeting_id = ? AND chunk_number = ?', [meetingId, chunkNumber]); }
-    else { console.error('Error Whisper:', error.message); db.run('UPDATE chunks SET processed = -1 WHERE meeting_id = ? AND chunk_number = ?', [meetingId, chunkNumber]); }
+    const code = error.status === 429 ? 2 : -1;
+    if (error.status === 429) console.warn(`Rate limit Whisper - chunk ${chunkNumber}`);
+    else console.error('Error Whisper:', error.message);
+    db.run('UPDATE chunks SET processed = ? WHERE meeting_id = ? AND chunk_number = ?',
+      [code, meetingId, chunkNumber]);
     return null;
   }
 };
 
-// ─── Rutas ─────────────────────────────────────────────────────────────────────
+// ─── Rutas ────────────────────────────────────────────────────────────────────
+
+app.get('/health', (req, res) => {
+  res.json({ ok: true, time: new Date().toISOString(), hasGroqKey: Boolean(GROQ_API_KEY) });
+});
 
 app.post('/startMeeting', (req, res) => {
   const meetingId = uuidv4();
   const { user_id = 'default', cliente = '', proyecto = '', responsable = '' } = req.body;
   const participantes = Array.isArray(req.body.participantes) ? JSON.stringify(req.body.participantes) : '[]';
   fs.mkdirSync(path.join(storagePath, meetingId), { recursive: true });
-  db.run('INSERT INTO meetings (id, user_id, status, started_at, cliente, proyecto, responsable, participantes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+  db.run(
+    'INSERT INTO meetings (id, user_id, status, started_at, cliente, proyecto, responsable, participantes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     [meetingId, user_id, 'active', new Date().toISOString(), cliente, proyecto, responsable, participantes],
-    function(err) { if (err) return res.status(500).json({ error: err.message }); res.json({ meetingId, userId: user_id, status: 'active' }); });
+    err => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ meetingId, status: 'active' });
+    }
+  );
 });
 
 app.post('/endMeeting', (req, res) => {
   const { meetingId } = req.body;
   if (!meetingId) return res.status(400).json({ error: 'Missing meetingId' });
-  db.run('UPDATE meetings SET status = ?, ended_at = ? WHERE id = ?', ['ended', new Date().toISOString(), meetingId], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ meetingId, status: 'ended' });
-    console.log(`[${meetingId}] Generando acta post-reunión...`);
-    generateActaIfReady(meetingId).catch(e => console.error(`Error acta:`, e.message));
-  });
+  db.run('UPDATE meetings SET status = ?, ended_at = ? WHERE id = ?',
+    ['ended', new Date().toISOString(), meetingId],
+    err => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ meetingId, status: 'ended' });
+      console.log(`[${meetingId}] Reunión finalizada. Iniciando post-proceso...`);
+      finalizeMeeting(meetingId).catch(e => console.error('Error finalizeMeeting:', e.message));
+    }
+  );
 });
 
 app.post('/chunk', upload.single('audio'), async (req, res) => {
   const { meetingId, chunkNumber } = req.body;
-  if (!meetingId || chunkNumber === undefined || !req.file) return res.status(400).json({ error: 'Missing fields' });
+  if (!meetingId || chunkNumber === undefined || !req.file)
+    return res.status(400).json({ error: 'Missing fields' });
+
   const audioDir = path.join(storagePath, meetingId);
   const filePath = path.join(audioDir, `chunk_${chunkNumber}.webm`);
   fs.mkdirSync(audioDir, { recursive: true });
   fs.writeFileSync(filePath, req.file.buffer);
-  db.run('INSERT INTO chunks (meeting_id, chunk_number, file_path, processed) VALUES (?, ?, ?, ?)',
-    [meetingId, parseInt(chunkNumber), filePath, 0], async function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ chunkId: this.lastID, meetingId, chunkNumber: parseInt(chunkNumber) });
-      processChunkWithWhisper(filePath, meetingId, parseInt(chunkNumber)).catch(console.error);
-    });
+
+  // Obtener participantes para Whisper prompt
+  db.get('SELECT participantes FROM meetings WHERE id = ?', [meetingId], (_, meeting) => {
+    let participantes = [];
+    try { participantes = JSON.parse(meeting?.participantes || '[]'); } catch(_) {}
+
+    db.run('INSERT INTO chunks (meeting_id, chunk_number, file_path, processed) VALUES (?, ?, ?, ?)',
+      [meetingId, parseInt(chunkNumber), filePath, 0],
+      function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ chunkId: this.lastID, meetingId, chunkNumber: parseInt(chunkNumber) });
+        processChunkWithWhisper(filePath, meetingId, parseInt(chunkNumber), participantes)
+          .catch(console.error);
+      }
+    );
+  });
 });
 
-// ── NUEVA: Crear reunión desde texto manual ────────────────────────────────────
+// Endpoint de progreso para el frontend
+app.get('/meetings/:id/progress', (req, res) => {
+  const { id } = req.params;
+  Promise.all([
+    new Promise(resolve => db.get('SELECT COUNT(*) as cnt FROM chunks WHERE meeting_id = ?', [id], (_, r) => resolve(r?.cnt || 0))),
+    new Promise(resolve => db.get('SELECT COUNT(*) as cnt FROM chunks WHERE meeting_id = ? AND processed = 1', [id], (_, r) => resolve(r?.cnt || 0))),
+    new Promise(resolve => db.get('SELECT COUNT(*) as cnt FROM section_summaries WHERE meeting_id = ?', [id], (_, r) => resolve(r?.cnt || 0))),
+    new Promise(resolve => db.get('SELECT COUNT(*) as cnt FROM transcriptions WHERE meeting_id = ?', [id], (_, r) => resolve(r?.cnt || 0))),
+    new Promise(resolve => db.get('SELECT status FROM meetings WHERE id = ?', [id], (_, r) => resolve(r?.status || 'unknown'))),
+  ]).then(([chunksTotal, chunksProcessed, sectionsGenerated, transcriptionLines, status]) => {
+    res.json({ chunksTotal, chunksProcessed, sectionsGenerated, transcriptionLines, status });
+  });
+});
+
+// ── Reunión desde texto manual ─────────────────────────────────────────────────
 app.post('/meetings/from-text', async (req, res) => {
-  const { user_id = 'default', cliente = '', proyecto = '', responsable = '', participantes: pRaw = [], texto = '', fecha = null, hora_inicio = '', hora_fin = '' } = req.body;
-  if (!texto || texto.trim().length < 10) return res.status(400).json({ error: 'El campo "texto" es requerido.' });
+  const {
+    user_id = 'default', cliente = '', proyecto = '', responsable = '',
+    participantes: pRaw = [], texto = '', fecha = null, hora_inicio = '', hora_fin = ''
+  } = req.body;
+
+  if (!texto || texto.trim().length < 10)
+    return res.status(400).json({ error: 'El campo "texto" es requerido.' });
 
   const meetingId = uuidv4();
-  const participantes = Array.isArray(pRaw) ? JSON.stringify(pRaw)
+  const participantes = Array.isArray(pRaw)
+    ? JSON.stringify(pRaw)
     : JSON.stringify(pRaw.toString().split(/[,;]/).map(p => p.trim()).filter(Boolean));
-  const startedAt = fecha ? new Date(`${fecha}T${hora_inicio || '00:00'}:00`).toISOString() : new Date().toISOString();
-  const endedAt = fecha && hora_fin ? new Date(`${fecha}T${hora_fin}:00`).toISOString() : new Date().toISOString();
 
-  db.run('INSERT INTO meetings (id, user_id, status, started_at, ended_at, cliente, proyecto, responsable, participantes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  const startedAt = fecha
+    ? new Date(`${fecha}T${hora_inicio || '09:00'}:00`).toISOString()
+    : new Date().toISOString();
+  const endedAt = fecha && hora_fin
+    ? new Date(`${fecha}T${hora_fin}:00`).toISOString()
+    : new Date().toISOString();
+
+  db.run(
+    'INSERT INTO meetings (id, user_id, status, started_at, ended_at, cliente, proyecto, responsable, participantes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [meetingId, user_id, 'ended', startedAt, endedAt, cliente, proyecto, responsable, participantes],
-    async function(err) {
+    async err => {
       if (err) return res.status(500).json({ error: err.message });
       insertTextAsTranscription(meetingId, texto, 0);
       res.json({ meetingId, status: 'ended', message: 'Reunión creada. Procesando acta...' });
-      setTimeout(() => generateActaIfReady(meetingId).catch(e => console.error(`Error acta from-text:`, e.message)), 500);
-    });
+      setTimeout(() => finalizeMeeting(meetingId).catch(console.error), 600);
+    }
+  );
 });
 
-// ── NUEVA: Agregar texto a reunión existente ────────────────────────────────────
 app.post('/meetings/:id/add-transcript', (req, res) => {
-  const { id } = req.params;
   const { texto = '' } = req.body;
   if (!texto.trim()) return res.status(400).json({ error: 'Texto vacío' });
-  db.get('SELECT id FROM meetings WHERE id = ?', [id], (err, row) => {
+  db.get('SELECT id FROM meetings WHERE id = ?', [req.params.id], (err, row) => {
     if (err || !row) return res.status(404).json({ error: 'Reunión no encontrada' });
-    db.get('SELECT MAX(chunk_number) as maxChunk FROM transcriptions WHERE meeting_id = ?', [id], (err2, r) => {
-      insertTextAsTranscription(id, texto, (r?.maxChunk || 0) + 1);
-      res.json({ ok: true, message: 'Texto agregado' });
-    });
+    db.get('SELECT MAX(chunk_number) as maxChunk FROM transcriptions WHERE meeting_id = ?',
+      [req.params.id], (_, r) => {
+        insertTextAsTranscription(req.params.id, texto, (r?.maxChunk || 0) + 1);
+        res.json({ ok: true });
+      });
   });
 });
 
 const insertTextAsTranscription = (meetingId, texto, startChunk) => {
-  const lineas = texto.split('\n').filter(l => l.trim().length > 0);
+  const lineas = texto.split('\n').filter(l => l.trim());
   let currentSpeaker = 'Texto';
   let segNum = startChunk;
   for (const linea of lineas) {
-    const speakerMatch = linea.match(/^\[?([^\]:]{1,40})\]?:\s*(.+)$/);
-    if (speakerMatch) {
-      currentSpeaker = speakerMatch[1].trim();
-      const text = speakerMatch[2].trim();
+    const match = linea.match(/^\[?([^\]:]{1,50})\]?:\s*(.+)$/);
+    if (match) {
+      currentSpeaker = match[1].trim();
+      const text = match[2].trim();
       if (text) db.run('INSERT INTO transcriptions (meeting_id, chunk_number, speaker, text, timestamp) VALUES (?, ?, ?, ?, ?)',
         [meetingId, segNum++, currentSpeaker, text, new Date().toISOString()]);
     } else if (linea.trim()) {
@@ -432,6 +757,7 @@ const insertTextAsTranscription = (meetingId, texto, startChunk) => {
   }
 };
 
+// ── Rutas de consulta ──────────────────────────────────────────────────────────
 app.get('/meetings', (req, res) => {
   const userId = req.query.user_id || 'default';
   db.all('SELECT * FROM meetings WHERE user_id = ? ORDER BY started_at DESC', [userId], (err, rows) => {
@@ -443,16 +769,17 @@ app.get('/meetings', (req, res) => {
 app.get('/meetings/:id', (req, res) => {
   db.get('SELECT * FROM meetings WHERE id = ?', [req.params.id], (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
-    if (!row) return res.status(404).json({ error: 'Meeting not found' });
+    if (!row) return res.status(404).json({ error: 'Not found' });
     res.json(row);
   });
 });
 
 app.get('/meetings/:id/transcription', (req, res) => {
-  db.all('SELECT * FROM transcriptions WHERE meeting_id = ? ORDER BY chunk_number, id', [req.params.id], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
-  });
+  db.all('SELECT * FROM transcriptions WHERE meeting_id = ? ORDER BY chunk_number, id',
+    [req.params.id], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    });
 });
 
 app.get('/meetings/:id/acta', (req, res) => {
@@ -471,20 +798,20 @@ app.get('/meetings/:id/tareas', (req, res) => {
 });
 
 app.put('/meetings/:id/acta', (req, res) => {
-  const actaJson = req.body;
-  if (!actaJson || typeof actaJson !== 'object') return res.status(400).json({ error: 'acta_json object required' });
-  db.run('INSERT OR REPLACE INTO actas (meeting_id, acta_json) VALUES (?, ?)', [req.params.id, JSON.stringify(actaJson)], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ ok: true });
-  });
+  if (!req.body || typeof req.body !== 'object') return res.status(400).json({ error: 'Invalid body' });
+  db.run('INSERT OR REPLACE INTO actas (meeting_id, acta_json) VALUES (?, ?)',
+    [req.params.id, JSON.stringify(req.body)], err => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ ok: true });
+    });
 });
 
 app.put('/meetings/:id/tareas', (req, res) => {
-  const tareas = Array.isArray(req.body) ? req.body : req.body.tareas;
+  const tareas = Array.isArray(req.body) ? req.body : req.body?.tareas;
   if (!Array.isArray(tareas)) return res.status(400).json({ error: 'tareas array required' });
-  db.run('DELETE FROM tareas WHERE meeting_id = ?', [req.params.id], function(err) {
+  db.run('DELETE FROM tareas WHERE meeting_id = ?', [req.params.id], err => {
     if (err) return res.status(500).json({ error: err.message });
-    if (tareas.length === 0) return res.json({ ok: true });
+    if (!tareas.length) return res.json({ ok: true });
     const stmt = db.prepare('INSERT INTO tareas (meeting_id, tarea_id, tipo, descripcion, responsable, estado, fecha_compromiso) VALUES (?, ?, ?, ?, ?, ?, ?)');
     tareas.forEach(t => stmt.run(req.params.id, t.tarea_id||'', t.tipo||'nueva', t.descripcion||'', t.responsable||'', t.estado||'pendiente', t.fecha_compromiso||''));
     stmt.finalize(() => res.json({ ok: true }));
@@ -492,12 +819,14 @@ app.put('/meetings/:id/tareas', (req, res) => {
 });
 
 app.post('/meetings/:id/reprocess-acta', async (req, res) => {
-  db.run('DELETE FROM tareas WHERE meeting_id = ?', [req.params.id], async (err) => {
-    if (err) return res.status(500).json({ error: err.message });
-    try {
-      await generateActaIfReady(req.params.id);
-      res.json({ ok: true, message: 'Acta reprocesada' });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+  const { id } = req.params;
+  db.run('DELETE FROM tareas WHERE meeting_id = ?', [id], () => {
+    db.run('DELETE FROM actas WHERE meeting_id = ?', [id], () => {
+      db.run('DELETE FROM section_summaries WHERE meeting_id = ?', [id], () => {
+        res.json({ ok: true, message: 'Reprocesando desde cero...' });
+        finalizeMeeting(id).catch(e => console.error('Reprocess error:', e.message));
+      });
+    });
   });
 });
 
