@@ -692,20 +692,140 @@ app.get('/meetings/:id/progress', (req, res) => {
   });
 });
 
-// ── Reunión desde texto manual ─────────────────────────────────────────────────
+// ── Reunión desde texto manual — procesamiento directo sin chunks ──────────────
+const generateActaFromText = async (texto, modo, meta, fechaDefault) => {
+  // Prompts específicos por tipo de entrada
+  const contextoPorModo = {
+    notas: `El texto es un conjunto de NOTAS LIBRES tomadas durante o después de una reunión. 
+Puede estar desordenado, con abreviaciones, bullets o párrafos mezclados.
+Tu trabajo es interpretar el contenido y estructurarlo en un acta profesional.`,
+    transcripcion: `El texto es una TRANSCRIPCIÓN de reunión, con diálogos entre participantes.
+Puede tener formato [Nombre]: texto o simplemente diálogo libre.
+Identifica los speakers y extrae los compromisos de cada uno.`,
+    email: `El texto es un EMAIL o MENSAJE DE RESUMEN enviado después de la reunión.
+Extrae los compromisos, acuerdos y pendientes mencionados.
+El autor del email generalmente es el moderador o responsable.`,
+  };
+
+  const contexto = contextoPorModo[modo] || contextoPorModo.notas;
+  const wordCount = texto.split(/\s+/).length;
+
+  // Para textos muy largos, hacer map-reduce primero
+  if (wordCount > 3000) {
+    console.log(`Texto largo (${wordCount} palabras) - usando map-reduce...`);
+    const words = texto.split(/\s+/);
+    const sections = [];
+    for (let i = 0; i < words.length; i += 2500) {
+      sections.push(words.slice(i, i + 2500).join(' '));
+    }
+    const extracts = [];
+    for (let i = 0; i < sections.length; i++) {
+      const raw = await callLLM(
+        `Analiza esta sección de reunión y extrae en JSON:
+{"temas": ["tema"], "decisiones": ["decisión"], "tareas": [{"tarea":"acción concreta","quien":"nombre","cuando":"fecha"}], "resumen": "2-3 frases"}
+
+CRÍTICO: solo tareas EXPLÍCITAS con acción concreta. NO genéricas.
+
+Texto: ${sections[i]}
+
+SOLO JSON válido.`,
+        'llama-3.1-8b-instant'
+      ).catch(() => null);
+      if (raw) { const p = parseJSON(raw); if (p) extracts.push(p); }
+      if (i < sections.length - 1) await sleep(1200);
+    }
+    // Combinar extracts
+    texto = extracts.map((e, i) =>
+      `Sección ${i+1}: ${e.resumen || ''} | Tareas: ${JSON.stringify(e.tareas || [])}`
+    ).join('\n');
+  }
+
+  const prompt = `Eres un asistente experto en redacción de actas de reunión.
+
+TIPO DE ENTRADA: ${contexto}
+
+DATOS DE IDENTIFICACIÓN (usa EXACTAMENTE estos valores, no los cambies):
+- cliente: "${meta.cliente}"
+- proyecto: "${meta.proyecto}"  
+- responsable: "${meta.responsable}"
+- participantes: ${JSON.stringify(meta.participantes)}
+- fecha: "${meta.fecha}"
+- hora_inicio: "${meta.hora_inicio}"
+- hora_fin: "${meta.hora_fin}"
+
+TEXTO DE LA REUNIÓN:
+${texto}
+
+Genera el acta en este JSON exacto:
+{
+  "identificacion": {
+    "cliente": "",
+    "proyecto": "",
+    "fecha": "",
+    "hora_inicio": "",
+    "hora_fin": "",
+    "responsable": "",
+    "participantes": []
+  },
+  "tareas_anteriores": [],
+  "tareas_nuevas": [
+    {
+      "id": "tarea_1",
+      "descripcion": "Descripción clara y específica de la acción a realizar",
+      "responsable": "Nombre de quien debe ejecutarla",
+      "fecha_compromiso": "${fechaDefault}"
+    }
+  ],
+  "resumen_reunion": "",
+  "observaciones_generales": ""
+}
+
+REGLAS CRÍTICAS — léelas con atención:
+
+Para "resumen_reunion":
+- Escribe 3-5 frases fluidas y narrativas que cuenten qué pasó en la reunión
+- Incluye: objetivo de la reunión, temas principales tratados, decisiones tomadas
+- NO hagas listas, escribe en prosa como un párrafo ejecutivo
+- Debe ser útil para alguien que no asistió
+
+Para "tareas_nuevas":
+- SOLO tareas EXPLÍCITAS: "Juan va a enviar el informe", "María prepara el documento"  
+- NUNCA tareas vagas: "revisar", "mejorar", "continuar", "hacer seguimiento", "coordinar" (sin objeto concreto)
+- Cada tarea debe tener UN responsable claro (si no se menciona, deja vacío)
+- fecha_compromiso: usa la fecha específica mencionada, o "${fechaDefault}" si no se menciona
+- IDs secuenciales: tarea_1, tarea_2, tarea_3...
+- Máximo 15 tareas. Si hay más, prioriza las más importantes y urgentes
+- Consolida tareas duplicadas o muy similares en una sola
+
+Para "tareas_anteriores":
+- Solo si el texto menciona EXPLÍCITAMENTE pendientes de reuniones anteriores
+- Si no hay mención, deja el array vacío []
+
+Para "observaciones_generales":
+- Notas adicionales relevantes que no encajen en el resumen
+- Puede estar vacío si no hay nada adicional
+
+RESPONDE SOLO CON EL JSON VÁLIDO, sin texto antes ni después.`;
+
+  const raw = await callLLM(prompt, 'llama-3.3-70b-versatile');
+  return parseJSON(raw);
+};
+
 app.post('/meetings/from-text', async (req, res) => {
   const {
     user_id = 'default', cliente = '', proyecto = '', responsable = '',
-    participantes: pRaw = [], texto = '', fecha = null, hora_inicio = '', hora_fin = ''
+    participantes: pRaw = [], texto = '', modo = 'notas',
+    fecha = null, hora_inicio = '', hora_fin = ''
   } = req.body;
 
-  if (!texto || texto.trim().length < 10)
-    return res.status(400).json({ error: 'El campo "texto" es requerido.' });
+  if (!texto || texto.trim().split(/\s+/).length < 10)
+    return res.status(400).json({ error: 'Necesitas al menos 10 palabras de contenido.' });
 
   const meetingId = uuidv4();
-  const participantes = Array.isArray(pRaw)
-    ? JSON.stringify(pRaw)
-    : JSON.stringify(pRaw.toString().split(/[,;]/).map(p => p.trim()).filter(Boolean));
+  const participantesArr = Array.isArray(pRaw)
+    ? pRaw
+    : pRaw.toString().split(/[,;]/).map(p => p.trim()).filter(Boolean);
+  const participantesStr = JSON.stringify(participantesArr);
 
   const startedAt = fecha
     ? new Date(`${fecha}T${hora_inicio || '09:00'}:00`).toISOString()
@@ -716,12 +836,73 @@ app.post('/meetings/from-text', async (req, res) => {
 
   db.run(
     'INSERT INTO meetings (id, user_id, status, started_at, ended_at, cliente, proyecto, responsable, participantes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [meetingId, user_id, 'ended', startedAt, endedAt, cliente, proyecto, responsable, participantes],
+    [meetingId, user_id, 'procesando', startedAt, endedAt, cliente, proyecto, responsable, participantesStr],
     async err => {
       if (err) return res.status(500).json({ error: err.message });
-      insertTextAsTranscription(meetingId, texto, 0);
-      res.json({ meetingId, status: 'ended', message: 'Reunión creada. Procesando acta...' });
-      setTimeout(() => finalizeMeeting(meetingId).catch(console.error), 600);
+
+      // Guardar texto como transcripción para verlo en la UI
+      insertTextAsTranscription(meetingId, texto.trim(), 0);
+
+      // Responder inmediatamente
+      res.json({ meetingId, status: 'procesando', message: 'Procesando...' });
+
+      // Procesar en segundo plano
+      try {
+        const startedDate = new Date(startedAt);
+        const endedDate = new Date(endedAt);
+        const meta = {
+          cliente, proyecto, responsable,
+          participantes: participantesArr,
+          fecha: startedDate.toISOString().split('T')[0],
+          hora_inicio: hora_inicio || `${String(startedDate.getHours()).padStart(2,'0')}:${String(startedDate.getMinutes()).padStart(2,'0')}`,
+          hora_fin: hora_fin || `${String(endedDate.getHours()).padStart(2,'0')}:${String(endedDate.getMinutes()).padStart(2,'0')}`,
+        };
+        const fechaDefault = addBusinessDays(meta.fecha, 3);
+
+        console.log(`[${meetingId}] Generando acta desde texto (modo: ${modo}, ${texto.split(/\s+/).length} palabras)...`);
+        let actaJson = await generateActaFromText(texto.trim(), modo, meta, fechaDefault);
+
+        if (!actaJson) {
+          actaJson = {
+            identificacion: { ...meta },
+            tareas_anteriores: [], tareas_nuevas: [],
+            resumen_reunion: 'No se pudo generar el acta automáticamente. Revisa el texto ingresado.',
+            observaciones_generales: ''
+          };
+        }
+
+        // Forzar identificación correcta
+        actaJson.identificacion = { ...meta };
+
+        // Guardar acta
+        db.run('INSERT OR REPLACE INTO actas (meeting_id, acta_json) VALUES (?, ?)',
+          [meetingId, JSON.stringify(actaJson)]);
+
+        // Guardar tareas
+        const seen = new Set();
+        let counter = 1;
+        (actaJson.tareas_nuevas || [])
+          .filter(t => {
+            const desc = (t.descripcion || '').trim().toLowerCase();
+            if (!desc || desc.length < 8 || seen.has(desc)) return false;
+            seen.add(desc); return true;
+          })
+          .forEach(t => {
+            db.run(
+              'INSERT INTO tareas (meeting_id, tarea_id, tipo, descripcion, responsable, estado, fecha_compromiso) VALUES (?, ?, ?, ?, ?, ?, ?)',
+              [meetingId, `tarea_${counter++}`, 'nueva',
+               (t.descripcion||'').trim(), (t.responsable||'').trim(),
+               'pendiente', t.fecha_compromiso || fechaDefault]
+            );
+          });
+
+        // Marcar como terminado
+        db.run('UPDATE meetings SET status = ? WHERE id = ?', ['ended', meetingId]);
+        console.log(`[${meetingId}] ✅ Acta lista. ${actaJson.tareas_nuevas?.length||0} tareas.`);
+      } catch (e) {
+        console.error(`[${meetingId}] Error procesando texto:`, e.message);
+        db.run('UPDATE meetings SET status = ? WHERE id = ?', ['ended', meetingId]);
+      }
     }
   );
 });
