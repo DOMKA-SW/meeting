@@ -14,8 +14,9 @@ function RecordMeeting() {
   const [meetingId, setMeetingId] = useState(null);
   const [chunkNumber, setChunkNumber] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [progress, setProgress] = useState({ chunksProcessed: 0, sectionsGenerated: 0, transcriptionLines: 0 });
+  const [progress, setProgress] = useState({ chunksTotal: 0, chunksProcessed: 0, sectionsGenerated: 0, transcriptionLines: 0 });
   const [statusMsg, setStatusMsg] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
 
   const mediaRecorderRef = useRef(null);
   const streamRef = useRef(null);
@@ -43,7 +44,7 @@ function RecordMeeting() {
           if (data.sectionsGenerated > 0) {
             setStatusMsg(`✅ ${data.sectionsGenerated} sección(es) procesada(s) · ${data.transcriptionLines} líneas transcritas`);
           } else if (data.chunksProcessed > 0) {
-            setStatusMsg(`🔄 ${data.chunksProcessed} chunk(s) transcritos · ${data.transcriptionLines} líneas`);
+            setStatusMsg(`🔄 ${data.chunksProcessed}/${data.chunksTotal} chunks transcritos · ${data.transcriptionLines} líneas`);
           }
         }
       } catch (_) {}
@@ -53,7 +54,7 @@ function RecordMeeting() {
   const sendChunk = useCallback(async (meetingIdToUse, chunkNum) => {
     if (chunksRef.current.length === 0) return;
     const blob = new Blob(chunksRef.current, { type: mimeTypeRef.current || 'audio/webm' });
-    if (blob.size < 1000) return; // Ignorar chunks vacíos o muy pequeños
+    if (blob.size < 500) return; // Umbral reducido de 1000 a 500 bytes
     const formData = new FormData();
     formData.append('audio', blob, `chunk_${chunkNum}.webm`);
     formData.append('meetingId', meetingIdToUse);
@@ -91,11 +92,13 @@ function RecordMeeting() {
 
     const recorder = mediaRecorderRef.current;
     if (recorder.state === 'recording') {
-      // Solicitar datos acumulados y parar
-      recorder.requestData();
-      await new Promise(r => setTimeout(r, 200));
-      recorder.stop();
-      await new Promise(r => setTimeout(r, 400));
+      // FIX: esperar el evento onstop en vez de timeouts fijos
+      await new Promise(resolve => {
+        recorder.onstop = resolve;
+        recorder.requestData();
+        recorder.stop();
+        setTimeout(resolve, 2000); // safety timeout
+      });
     }
 
     // Enviar chunk actual
@@ -116,16 +119,18 @@ function RecordMeeting() {
   }, [sendChunk, createAndStartRecorder]);
 
   const startMeeting = async () => {
+    setErrorMsg('');
+    setStatusMsg('');
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
-      if (!stream) { alert('No se pudo obtener audio de pantalla.'); return; }
-
-      const audioTracks = stream.getAudioTracks();
-      if (audioTracks.length === 0) {
-        alert('No se detectó audio. Habilita "Compartir audio del sistema" al compartir pantalla.');
-        stream.getTracks().forEach(t => t.stop());
+      // Verificar que el backend esté disponible
+      try {
+        await fetch(`${API_URL}/health`);
+      } catch (_) {
+        setErrorMsg('❌ No se puede conectar al servidor. Verifica que el backend esté activo en Railway.');
         return;
       }
+
+      const stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
 
       // Minimizar video para ahorrar recursos
       const videoTracks = stream.getVideoTracks();
@@ -133,10 +138,26 @@ function RecordMeeting() {
         try { await vt.applyConstraints({ width: 1, height: 1, frameRate: 1 }); } catch (_) {}
       }
 
+      let audioTracks = stream.getAudioTracks();
+
+      // FIX: Fallback a micrófono si no hay audio del sistema
+      if (audioTracks.length === 0) {
+        setStatusMsg('⚠️ No se detectó audio del sistema. Intentando micrófono...');
+        try {
+          const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          audioTracks = micStream.getAudioTracks();
+          setStatusMsg('🎤 Usando micrófono (para mejor calidad, activa "Compartir audio del sistema")');
+        } catch (micErr) {
+          stream.getTracks().forEach(t => t.stop());
+          setErrorMsg('❌ Sin fuente de audio. Habilita el micrófono o "Compartir audio del sistema".');
+          return;
+        }
+      }
+
       const mimeType = getSupportedMimeType();
       if (!mimeType) {
-        alert('Tu navegador no soporta grabación. Usa Chrome o Edge.');
         stream.getTracks().forEach(t => t.stop());
+        setErrorMsg('❌ Tu navegador no soporta grabación. Usa Chrome o Edge.');
         return;
       }
 
@@ -158,6 +179,14 @@ function RecordMeeting() {
           participantes: participantesArr
         })
       });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setErrorMsg(`❌ Error del servidor: ${err.error || res.statusText}`);
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
+
       const data = await res.json();
       const mid = data.meetingId;
       setMeetingId(mid);
@@ -191,7 +220,16 @@ function RecordMeeting() {
       setIsRecording(true);
     } catch (err) {
       console.error('Error iniciando reunión:', err);
-      alert('No se pudo iniciar: ' + err.message);
+      // FIX: mensajes de error específicos por tipo
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setErrorMsg('❌ Permiso denegado. Debes permitir compartir pantalla para grabar.');
+      } else if (err.name === 'NotFoundError') {
+        setErrorMsg('❌ No se encontró dispositivo de audio o pantalla.');
+      } else if (err.name === 'AbortError') {
+        setErrorMsg(''); // El usuario canceló el diálogo, no es un error real
+      } else {
+        setErrorMsg('❌ ' + (err.message || 'Error desconocido al iniciar'));
+      }
     }
   };
 
@@ -203,10 +241,12 @@ function RecordMeeting() {
 
     // Parar recorder y enviar último chunk
     if (mediaRecorderRef.current?.state === 'recording') {
-      mediaRecorderRef.current.requestData();
-      await new Promise(r => setTimeout(r, 300));
-      mediaRecorderRef.current.stop();
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(resolve => {
+        mediaRecorderRef.current.onstop = resolve;
+        mediaRecorderRef.current.requestData();
+        mediaRecorderRef.current.stop();
+        setTimeout(resolve, 2000);
+      });
     }
 
     const mid = currentMeetingIdRef.current;
@@ -228,7 +268,7 @@ function RecordMeeting() {
     // Reset
     setStep('form'); setIsRecording(false); setMeetingId(null);
     setChunkNumber(0); setDuration(0); setStatusMsg('');
-    setProgress({ chunksProcessed: 0, sectionsGenerated: 0, transcriptionLines: 0 });
+    setProgress({ chunksTotal: 0, chunksProcessed: 0, sectionsGenerated: 0, transcriptionLines: 0 });
     chunksRef.current = []; mediaRecorderRef.current = null;
     currentMeetingIdRef.current = null; mimeTypeRef.current = null;
 
@@ -266,6 +306,13 @@ function RecordMeeting() {
             Captura el audio de tu reunión (Zoom, Teams, Meet...) y genera el acta automáticamente.
           </p>
 
+          {/* FIX: Mostrar errores en UI en vez de alert() */}
+          {errorMsg && (
+            <div style={{ padding: 12, backgroundColor: '#fdecea', border: '1px solid #f5c6cb', borderRadius: 8, marginBottom: 16, fontSize: 13, color: '#c62828' }}>
+              {errorMsg}
+            </div>
+          )}
+
           <div style={{ padding: 20, backgroundColor: '#f9f9f9', borderRadius: 8, marginBottom: 16 }}>
             <p style={{ fontWeight: 'bold', marginBottom: 14 }}>Datos de la reunión</p>
             {[
@@ -298,7 +345,7 @@ function RecordMeeting() {
             <ul style={{ marginTop: 6, marginBottom: 0, paddingLeft: 18 }}>
               <li>Usa <strong>Chrome o Edge</strong> (mejor soporte de audio)</li>
               <li>Al compartir pantalla, activa <strong>"Compartir audio del sistema"</strong></li>
-              <li>Asegúrate de que el audio de la reunión esté <strong>sin mute</strong></li>
+              <li>Si no hay audio del sistema, el micrófono se usará automáticamente</li>
               <li>Ingresa los nombres de los participantes arriba para mejor identificación</li>
             </ul>
           </div>
@@ -333,11 +380,12 @@ function RecordMeeting() {
               </span>
             </div>
 
+            {/* FIX: 3 métricas diferenciadas: local / servidor / transcritos */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
               {[
-                ['Chunks enviados', chunkNumber, '#64b5f6'],
+                ['Grabados', chunkNumber, '#64b5f6'],
+                ['En servidor', progress.chunksTotal || 0, '#ff9800'],
                 ['Transcritos', progress.chunksProcessed, '#81c784'],
-                ['Secciones procesadas', progress.sectionsGenerated, '#ffb74d'],
               ].map(([label, value, color]) => (
                 <div key={label} style={{ textAlign: 'center', padding: '10px 8px', backgroundColor: '#2a2a4a', borderRadius: 8 }}>
                   <div style={{ fontSize: 22, fontWeight: 'bold', color }}>{value}</div>
