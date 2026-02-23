@@ -644,7 +644,7 @@ app.post('/endMeeting', (req, res) => {
     ['ended', new Date().toISOString(), meetingId],
     err => {
       if (err) return res.status(500).json({ error: err.message });
-      res.json({ meetingId, status: 'ended' });
+      res.json({ meetingId, status: 'ended', actaStatus: 'processing' });
       console.log(`[${meetingId}] Reunión finalizada. Iniciando post-proceso...`);
       finalizeMeeting(meetingId).catch(e => console.error('Error finalizeMeeting:', e.message));
     }
@@ -964,11 +964,39 @@ app.get('/meetings/:id/transcription', (req, res) => {
 });
 
 app.get('/meetings/:id/acta', (req, res) => {
-  db.get('SELECT acta_json FROM actas WHERE meeting_id = ?', [req.params.id], (err, row) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (!row) return res.status(404).json({ error: 'Acta not found' });
-    res.json(JSON.parse(row.acta_json));
-  });
+  const meetingId = req.params.id;
+
+  db.get(
+    'SELECT status FROM meetings WHERE id = ?',
+    [meetingId],
+    (err, meeting) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (!meeting) return res.status(404).json({ error: 'Meeting not found' });
+
+      db.get(
+        'SELECT acta_json FROM actas WHERE meeting_id = ?',
+        [meetingId],
+        (err, row) => {
+          if (err) return res.status(500).json({ error: err.message });
+
+          // 👉 Acta aún en proceso (caso NORMAL)
+          if (!row) {
+            return res.status(202).json({
+              status: 'processing',
+              meetingStatus: meeting.status,
+              message: 'El acta aún se está generando'
+            });
+          }
+
+          // 👉 Acta lista
+          res.json({
+            status: 'ready',
+            acta: JSON.parse(row.acta_json)
+          });
+        }
+      );
+    }
+  );
 });
 
 app.get('/meetings/:id/tareas', (req, res) => {
