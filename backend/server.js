@@ -836,7 +836,7 @@ app.post('/meetings/from-text', async (req, res) => {
 
   db.run(
     'INSERT INTO meetings (id, user_id, status, started_at, ended_at, cliente, proyecto, responsable, participantes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [meetingId, user_id, 'procesando', startedAt, endedAt, cliente, proyecto, responsable, participantesStr],
+    [meetingId, user_id, 'ended', startedAt, endedAt, cliente, proyecto, responsable, participantesStr],
     async err => {
       if (err) return res.status(500).json({ error: err.message });
 
@@ -844,7 +844,7 @@ app.post('/meetings/from-text', async (req, res) => {
       insertTextAsTranscription(meetingId, texto.trim(), 0);
 
       // Responder inmediatamente
-      res.json({ meetingId, status: 'procesando', message: 'Procesando...' });
+      res.json({ meetingId, status: 'ended', message: 'Procesando...' });
 
       // Procesar en segundo plano
       try {
@@ -920,7 +920,7 @@ app.post('/meetings/:id/add-transcript', (req, res) => {
   });
 });
 
-const insertTextAsTranscription = (meetingId, texto, startChunk) => {
+function insertTextAsTranscription(meetingId, texto, startChunk) {
   const lineas = texto.split('\n').filter(l => l.trim());
   let currentSpeaker = 'Texto';
   let segNum = startChunk;
