@@ -474,15 +474,16 @@ const finalizeMeeting = async (meetingId) => {
       let participantes = [];
       try { participantes = JSON.parse(meeting.participantes || '[]'); } catch(_) {}
 
-      // Esperar a que terminen los chunks en vuelo (máx 30s)
+      // Esperar a que terminen los chunks en vuelo (máx 3 minutos)
       let waited = 0;
-      while (waited < 30000) {
+      const MAX_WAIT = 3 * 60 * 1000; // FIX: era 30s, ahora 3 min para tolerar rate-limit de Groq
+      while (waited < MAX_WAIT) {
         const pending = await new Promise(resolve =>
           db.get('SELECT COUNT(*) as cnt FROM chunks WHERE meeting_id = ? AND processed = 0',
             [meetingId], (_, r) => resolve(r?.cnt || 0)));
         if (pending === 0) break;
-        await sleep(2000);
-        waited += 2000;
+        await sleep(3000);
+        waited += 3000;
       }
 
       // Generar sección final con los chunks restantes no cubiertos por secciones previas
