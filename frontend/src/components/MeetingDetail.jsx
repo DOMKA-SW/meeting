@@ -223,11 +223,13 @@ function MeetingDetail() {
   useEffect(() => {
     fetchMeetingData();
     const isEditing = editingActa || Object.keys(editingRows).length > 0;
-    if (!isEditing) {
+    const isCompleted = meeting?.status === 'completed';
+    // FIX: detener polling cuando el acta ya está lista para no sobrecargar el servidor
+    if (!isEditing && !isCompleted) {
       const interval = setInterval(fetchMeetingData, 5000);
       return () => clearInterval(interval);
     }
-  }, [id, editingActa, editingRows]);
+  }, [id, editingActa, editingRows, meeting?.status]);
 
   const fetchMeetingData = async () => {
     if (editingActa || Object.keys(editingRows).length > 0) return;
@@ -242,8 +244,10 @@ function MeetingDetail() {
       if (transcriptionRes.ok) setTranscription(await transcriptionRes.json());
       if (actaRes && actaRes.ok) {
         const actaData = await actaRes.json();
-        setActa(actaData);
-        if (!actaDirty && !editingActa) setActaDraft(actaData);
+        // FIX: el backend envuelve el acta en { status, acta: {...} }
+        const actaObj = actaData?.acta || actaData;
+        setActa(actaObj);
+        if (!actaDirty && !editingActa) setActaDraft(actaObj);
       }
       if (tareasRes.ok) {
         const tareasData = await tareasRes.json();
