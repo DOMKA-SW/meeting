@@ -7,6 +7,9 @@ const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
 const OpenAI = require('openai');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 
 const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
@@ -559,24 +562,74 @@ const finalizeMeeting = async (meetingId) => {
   );
 };
 
+// ─── Conversión de audio: webm → mp3 usando ffmpeg ───────────────────────────
+const convertToMp3 = async (inputPath) => {
+  const outputPath = inputPath.replace(/\.webm$/, '.mp3');
+  try {
+    await execFileAsync('ffmpeg', [
+      '-y',                  // sobreescribir si existe
+      '-i', inputPath,       // archivo de entrada
+      '-vn',                 // sin video
+      '-ar', '16000',        // 16kHz — óptimo para Whisper
+      '-ac', '1',            // mono
+      '-b:a', '64k',         // bitrate bajo para reducir tamaño
+      outputPath
+    ]);
+    return outputPath;
+  } catch (e) {
+    console.error('ffmpeg error:', e.message);
+    return null; // Si ffmpeg falla, se usará el webm original
+  }
+};
+
 // ─── Transcripción Whisper ────────────────────────────────────────────────────
 const processChunkWithWhisper = async (filePath, meetingId, chunkNumber, participantes = []) => {
   if (!GROQ_API_KEY) {
     db.run('UPDATE chunks SET processed = 2 WHERE meeting_id = ? AND chunk_number = ?', [meetingId, chunkNumber]);
     return null;
   }
+
+  let fileToSend = filePath;
+  let mp3Path = null;
+
+  // FIX: Convertir webm a mp3 antes de enviar a Whisper
+  // Whisper de Groq rechaza webms con "audio file is too short" aunque tengan contenido
   try {
-    // Prompt para Whisper: ayuda con nombres propios y contexto
+    mp3Path = await convertToMp3(filePath);
+    if (mp3Path && fs.existsSync(mp3Path)) {
+      const mp3Size = fs.statSync(mp3Path).size;
+      const webmSize = fs.statSync(filePath).size;
+      console.log(`[chunk ${chunkNumber}] webm: ${(webmSize/1024).toFixed(0)}KB → mp3: ${(mp3Size/1024).toFixed(0)}KB`);
+      if (mp3Size > 1000) {
+        fileToSend = mp3Path; // Usar mp3 solo si la conversión produjo algo
+      } else {
+        console.warn(`[chunk ${chunkNumber}] mp3 muy pequeño (${mp3Size}B), usando webm original`);
+      }
+    }
+  } catch (convErr) {
+    console.warn(`[chunk ${chunkNumber}] No se pudo convertir a mp3, usando webm:`, convErr.message);
+  }
+
+  try {
+    const fileSizeKB = fs.statSync(fileToSend).size / 1024;
+    if (fileSizeKB < 1) {
+      console.warn(`[chunk ${chunkNumber}] Archivo demasiado pequeño (${fileSizeKB.toFixed(1)}KB), descartando`);
+      db.run('UPDATE chunks SET processed = 1 WHERE meeting_id = ? AND chunk_number = ?', [meetingId, chunkNumber]);
+      return null;
+    }
+
     const whisperPrompt = participantes.length > 0
       ? `Reunión de trabajo. Participantes: ${participantes.join(', ')}.`
       : 'Reunión de trabajo en español.';
 
+    console.log(`[chunk ${chunkNumber}] Enviando a Whisper: ${path.basename(fileToSend)} (${fileSizeKB.toFixed(0)}KB)`);
+
     const transcription = await groq.audio.transcriptions.create({
-      file: fs.createReadStream(filePath),
+      file: fs.createReadStream(fileToSend),
       model: 'whisper-large-v3-turbo',
       response_format: 'verbose_json',
-      language: 'es',          // Hint de idioma → más preciso y rápido
-      prompt: whisperPrompt    // Ayuda con nombres propios
+      language: 'es',
+      prompt: whisperPrompt
     });
 
     const segments = Array.isArray(transcription.segments) ? transcription.segments : [];
@@ -593,26 +646,44 @@ const processChunkWithWhisper = async (filePath, meetingId, chunkNumber, partici
           );
         }
       }
+      console.log(`[chunk ${chunkNumber}] ✅ ${segments.length} segmentos transcritos`);
     } else if (transcription.text?.trim()) {
       db.run(
         'INSERT INTO transcriptions (meeting_id, chunk_number, speaker, text, timestamp) VALUES (?, ?, ?, ?, ?)',
         [meetingId, chunkNumber, 'Speaker1', transcription.text.trim(), new Date().toISOString()]
       );
+      console.log(`[chunk ${chunkNumber}] ✅ Texto transcrito (sin segmentos)`);
+    } else {
+      console.warn(`[chunk ${chunkNumber}] ⚠️ Whisper respondió OK pero sin texto (silencio o audio inaudible)`);
     }
+
+    // Limpiar mp3 temporal
+    if (mp3Path && fs.existsSync(mp3Path)) fs.unlinkSync(mp3Path);
 
     db.run('UPDATE chunks SET processed = 1 WHERE meeting_id = ? AND chunk_number = ?',
       [meetingId, chunkNumber], () => {
-        // Verificar si toca generar resumen de sección
         checkAndTriggerSectionSummary(meetingId);
       });
 
     return transcription;
   } catch (error) {
+    if (mp3Path && fs.existsSync(mp3Path)) try { fs.unlinkSync(mp3Path); } catch(_) {}
     const code = error.status === 429 ? 2 : -1;
-    if (error.status === 429) console.warn(`Rate limit Whisper - chunk ${chunkNumber}`);
-    else console.error('Error Whisper:', error.message);
+    if (error.status === 429) console.warn(`Rate limit Whisper - chunk ${chunkNumber}, reintentando en 60s...`);
+    else console.error(`Error Whisper chunk ${chunkNumber}:`, error.message);
     db.run('UPDATE chunks SET processed = ? WHERE meeting_id = ? AND chunk_number = ?',
       [code, meetingId, chunkNumber]);
+
+    // Auto-reintento si fue rate limit (esperar 60s y volver a intentar)
+    if (error.status === 429) {
+      setTimeout(() => {
+        db.run('UPDATE chunks SET processed = 0 WHERE meeting_id = ? AND chunk_number = ? AND processed = 2',
+          [meetingId, chunkNumber], () => {
+            processChunkWithWhisper(filePath, meetingId, chunkNumber, participantes).catch(() => {});
+          });
+      }, 60000);
+    }
+
     return null;
   }
 };
