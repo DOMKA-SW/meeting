@@ -13,22 +13,22 @@ function safeJsonParseArray(s) {
 function generarPDF(acta, meeting) {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
   const margin = 20;
   const contentW = pageW - margin * 2;
   let y = 20;
 
-  const colores = {
-    azul: [30, 90, 160],
-    azulClaro: [220, 232, 248],
-    grisOscuro: [60, 60, 60],
-    grisMedio: [120, 120, 120],
-    grisFondo: [248, 249, 250],
-    blanco: [255, 255, 255],
-    linea: [200, 210, 220],
+  const colors = {
+    black: [0, 0, 0],
+    darkGray: [80, 80, 80],
+    gray: [130, 130, 130],
+    lightGray: [245, 245, 245],
+    border: [180, 180, 180],
+    white: [255, 255, 255],
   };
 
   const checkPage = (needed = 10) => {
-    if (y + needed > doc.internal.pageSize.getHeight() - 20) {
+    if (y + needed > pageH - 20) {
       doc.addPage();
       y = 20;
     }
@@ -36,159 +36,169 @@ function generarPDF(acta, meeting) {
 
   const sectionTitle = (text) => {
     checkPage(14);
-    doc.setFillColor(...colores.azul);
-    doc.rect(margin, y, contentW, 8, 'F');
-    doc.setTextColor(...colores.blanco);
-    doc.setFontSize(10);
     doc.setFont('helvetica', 'bold');
-    doc.text(text.toUpperCase(), margin + 4, y + 5.5);
-    doc.setTextColor(...colores.grisOscuro);
-    doc.setFont('helvetica', 'normal');
-    y += 11;
+    doc.setFontSize(11);
+    doc.setTextColor(...colors.black);
+    doc.text(text.toUpperCase(), margin, y);
+    y += 2;
+    doc.setDrawColor(...colors.black);
+    doc.line(margin, y, margin + contentW, y);
+    y += 8;
   };
 
-  const textBlock = (text, indent = 0) => {
+  const textBlock = (text) => {
     if (!text) return;
-    doc.setFontSize(9);
     doc.setFont('helvetica', 'normal');
-    doc.setTextColor(40, 40, 40);
-    const lines = doc.splitTextToSize(String(text), contentW - indent);
+    doc.setFontSize(9);
+    doc.setTextColor(...colors.darkGray);
+    const lines = doc.splitTextToSize(String(text), contentW);
     lines.forEach(line => {
       checkPage(6);
-      doc.text(line, margin + indent, y);
+      doc.text(line, margin, y);
       y += 5;
     });
-    y += 2;
+    y += 4;
   };
 
-  // ── ENCABEZADO ──────────────────────────────────────────────────────────────
-  doc.setFillColor(...colores.azul);
-  doc.rect(0, 0, pageW, 14, 'F');
-  doc.setTextColor(...colores.blanco);
-  doc.setFontSize(13);
+  // ── ENCABEZADO ───────────────────────────────────────────────
   doc.setFont('helvetica', 'bold');
-  doc.text('ACTA DE REUNIÓN', pageW / 2, 9, { align: 'center' });
-  doc.setTextColor(...colores.grisOscuro);
-  y = 22;
+  doc.setFontSize(14);
+  doc.setTextColor(...colors.black);
+  doc.text('ACTA DE REUNIÓN', pageW / 2, y, { align: 'center' });
+  y += 10;
 
-  // ── IDENTIFICACIÓN ──────────────────────────────────────────────────────────
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`Generado el ${new Date().toLocaleDateString('es-ES')}`, pageW / 2, y, { align: 'center' });
+  y += 12;
+
+  // ── IDENTIFICACIÓN ───────────────────────────────────────────
   sectionTitle('Identificación');
 
   const id = acta.identificacion || {};
   const startedDate = meeting?.started_at ? new Date(meeting.started_at) : null;
   const endedDate = meeting?.ended_at ? new Date(meeting.ended_at) : null;
 
-  const fecha = id.fecha || (startedDate ? startedDate.toISOString().split('T')[0] : '');
-  const horaInicio = id.hora_inicio || (startedDate
-    ? `${String(startedDate.getHours()).padStart(2,'0')}:${String(startedDate.getMinutes()).padStart(2,'0')}` : '');
-  const horaFin = id.hora_fin || (endedDate
-    ? `${String(endedDate.getHours()).padStart(2,'0')}:${String(endedDate.getMinutes()).padStart(2,'0')}` : '');
-  const participantes = Array.isArray(id.participantes) ? id.participantes.join(', ') : (id.participantes || '');
+  const rows = [
+    ['Cliente', id.cliente],
+    ['Proyecto', id.proyecto],
+    ['Responsable', id.responsable],
+    ['Fecha', id.fecha || (startedDate ? startedDate.toISOString().split('T')[0] : '')],
+    ['Hora inicio', id.hora_inicio || (startedDate ? startedDate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '')],
+    ['Hora fin', id.hora_fin || (endedDate ? endedDate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '')],
+    ['Participantes', Array.isArray(id.participantes) ? id.participantes.join(', ') : id.participantes],
+  ];
 
-  // Cuadro de info en 2 columnas
-  doc.setFillColor(...colores.grisFondo);
-  doc.roundedRect(margin, y, contentW, 48, 2, 2, 'F');
-  doc.setDrawColor(...colores.linea);
-  doc.roundedRect(margin, y, contentW, 48, 2, 2, 'S');
+  rows.forEach(([label, value]) => {
+    checkPage(6);
+    doc.setFont('helvetica', 'bold');
+    doc.text(label + ':', margin, y);
+    doc.setFont('helvetica', 'normal');
+    doc.text(String(value || '—'), margin + 40, y);
+    y += 6;
+  });
+
   y += 6;
 
-  const colLeft = margin + 4;
-  const colRight = margin + contentW / 2 + 4;
-  const ySaved = y;
-
-  doc.setFontSize(9);
-  [['Cliente', id.cliente], ['Proyecto', id.proyecto], ['Responsable', id.responsable]].forEach(([lbl, val]) => {
-    doc.setFont('helvetica', 'bold'); doc.text(lbl + ':', colLeft, y);
-    doc.setFont('helvetica', 'normal'); doc.text(String(val || '—'), colLeft + 28, y);
-    y += 7;
-  });
-
-  y = ySaved;
-  [['Fecha', fecha], ['Hora inicio', horaInicio], ['Hora fin', horaFin]].forEach(([lbl, val]) => {
-    doc.setFont('helvetica', 'bold'); doc.text(lbl + ':', colRight, y);
-    doc.setFont('helvetica', 'normal'); doc.text(String(val || '—'), colRight + 28, y);
-    y += 7;
-  });
-
-  y = ySaved + 3 * 7 + 4;
-  doc.setFont('helvetica', 'bold'); doc.text('Participantes:', colLeft, y);
-  doc.setFont('helvetica', 'normal');
-  const partLines = doc.splitTextToSize(participantes || '—', contentW - 36);
-  doc.text(partLines, colLeft + 28, y);
-  y += partLines.length * 5 + 6;
-
-  // ── TAREAS ANTERIORES ───────────────────────────────────────────────────────
+  // ── TAREAS ANTERIORES ─────────────────────────────────────────
   sectionTitle('Tareas Anteriores');
+
   const tareasAnt = acta.tareas_anteriores || [];
+
   if (tareasAnt.length === 0) {
-    doc.setFontSize(9); doc.setTextColor(...colores.grisMedio);
-    doc.text('Sin tareas anteriores registradas.', margin + 4, y);
-    doc.setTextColor(...colores.grisOscuro);
-    y += 7;
+    doc.setFontSize(9);
+    doc.setTextColor(...colors.gray);
+    doc.text('No hay tareas anteriores registradas.', margin, y);
+    y += 8;
   } else {
     autoTable(doc, {
       startY: y,
       margin: { left: margin, right: margin },
-      head: [['#', 'Descripción', 'Responsable', 'Estado']],
-      body: tareasAnt.map((t, i) => [t.id || `${i + 1}`, t.descripcion || '', t.responsable || '', t.estado || 'pendiente']),
-      styles: { fontSize: 8.5, cellPadding: 3 },
-      headStyles: { fillColor: colores.azulClaro, textColor: colores.azul, fontStyle: 'bold' },
-      alternateRowStyles: { fillColor: [250, 252, 255] },
-      columnStyles: { 0: { cellWidth: 12 }, 2: { cellWidth: 36 }, 3: { cellWidth: 24 } },
+      head: [['ID', 'Descripción', 'Responsable', 'Estado', 'Proyecto']],
+      body: tareasAnt.map((t, i) => [
+        t.id || i + 1,
+        t.descripcion || '',
+        t.responsable || '',
+        t.estado || '',
+        t.proyecto || id.proyecto || ''
+      ]),
+      styles: {
+        fontSize: 8.5,
+        cellPadding: 3,
+        textColor: colors.black,
+        lineColor: colors.border,
+        lineWidth: 0.1
+      },
+      headStyles: {
+        fillColor: colors.lightGray,
+        textColor: colors.black,
+        fontStyle: 'bold'
+      }
     });
-    y = doc.lastAutoTable.finalY + 6;
+    y = doc.lastAutoTable.finalY + 8;
   }
 
-  // ── TAREAS NUEVAS ───────────────────────────────────────────────────────────
-  checkPage(20);
+  // ── TAREAS NUEVAS ────────────────────────────────────────────
   sectionTitle('Tareas Nuevas');
+
   const tareasNuevas = acta.tareas_nuevas || [];
+
   if (tareasNuevas.length === 0) {
-    doc.setFontSize(9); doc.setTextColor(...colores.grisMedio);
-    doc.text('Sin tareas nuevas.', margin + 4, y);
-    doc.setTextColor(...colores.grisOscuro);
-    y += 7;
+    doc.setFontSize(9);
+    doc.setTextColor(...colors.gray);
+    doc.text('No hay tareas nuevas.', margin, y);
+    y += 8;
   } else {
     autoTable(doc, {
       startY: y,
       margin: { left: margin, right: margin },
-      head: [['Id', 'Descripción', 'Responsable', 'Fecha Fin']],
-      body: tareasNuevas.map((t, i) => [t.id || `tarea_${i + 1}`, t.descripcion || '', t.responsable || '', t.fecha_compromiso || '']),
-      styles: { fontSize: 8.5, cellPadding: 3 },
-      headStyles: { fillColor: colores.azul, textColor: colores.blanco, fontStyle: 'bold' },
-      alternateRowStyles: { fillColor: [248, 250, 255] },
-      columnStyles: { 0: { cellWidth: 20 }, 2: { cellWidth: 36 }, 3: { cellWidth: 26 } },
+      head: [['ID', 'Descripción', 'Responsable', 'Fecha fin', 'Proyecto']],
+      body: tareasNuevas.map((t, i) => [
+        t.id || `T-${i + 1}`,
+        t.descripcion || '',
+        t.responsable || '',
+        t.fecha_compromiso || '',
+        t.proyecto || id.proyecto || ''
+      ]),
+      styles: {
+        fontSize: 8.5,
+        cellPadding: 3,
+        textColor: colors.black,
+        lineColor: colors.border,
+        lineWidth: 0.1
+      },
+      headStyles: {
+        fillColor: colors.lightGray,
+        textColor: colors.black,
+        fontStyle: 'bold'
+      }
     });
-    y = doc.lastAutoTable.finalY + 6;
+    y = doc.lastAutoTable.finalY + 8;
   }
 
-  // ── RESUMEN ─────────────────────────────────────────────────────────────────
-  checkPage(20);
-  sectionTitle('Resumen de Reunión');
-  textBlock(acta.resumen_reunion, 4);
+  // ── RESUMEN ───────────────────────────────────────────────────
+  sectionTitle('Resumen de la Reunión');
+  textBlock(acta.resumen_reunion);
 
-  // ── OBSERVACIONES ────────────────────────────────────────────────────────────
+  // ── OBSERVACIONES ────────────────────────────────────────────
   if (acta.observaciones_generales) {
-    checkPage(20);
     sectionTitle('Observaciones Generales');
-    textBlock(acta.observaciones_generales, 4);
+    textBlock(acta.observaciones_generales);
   }
 
-  // ── PIE DE PÁGINA ────────────────────────────────────────────────────────────
+  // ── PIE DE PÁGINA ────────────────────────────────────────────
   const totalPages = doc.internal.getNumberOfPages();
   for (let i = 1; i <= totalPages; i++) {
     doc.setPage(i);
-    const pageH = doc.internal.pageSize.getHeight();
-    doc.setFillColor(...colores.azul);
-    doc.rect(0, pageH - 10, pageW, 10, 'F');
     doc.setFontSize(7.5);
-    doc.setTextColor(...colores.blanco);
-    doc.text('Acta generada automáticamente', margin, pageH - 3.5);
-    doc.text(`Página ${i} de ${totalPages}`, pageW - margin, pageH - 3.5, { align: 'right' });
+    doc.setTextColor(...colors.gray);
+    doc.text(`Página ${i} de ${totalPages}`, pageW - margin, pageH - 10, { align: 'right' });
+    doc.text('Documento generado automáticamente', margin, pageH - 10);
   }
 
   const clienteFile = id.cliente ? id.cliente.replace(/[^a-z0-9]/gi, '_') : 'acta';
-  const fechaFile = fecha ? fecha.replace(/-/g, '') : 'sin_fecha';
+  const fechaFile = id.fecha ? id.fecha.replace(/-/g, '') : 'sin_fecha';
+
   doc.save(`Acta_${clienteFile}_${fechaFile}.pdf`);
 }
 
