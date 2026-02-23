@@ -936,7 +936,7 @@ const insertTextAsTranscription = (meetingId, texto, startChunk) => {
         [meetingId, segNum++, currentSpeaker, linea.trim(), new Date().toISOString()]);
     }
   }
-};
+}
 
 // ── Rutas de consulta ──────────────────────────────────────────────────────────
 app.get('/meetings', (req, res) => {
