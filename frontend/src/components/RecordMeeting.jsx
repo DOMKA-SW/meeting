@@ -54,7 +54,12 @@ function RecordMeeting() {
   const sendChunk = useCallback(async (meetingIdToUse, chunkNum) => {
     if (chunksRef.current.length === 0) return;
     const blob = new Blob(chunksRef.current, { type: mimeTypeRef.current || 'audio/webm' });
-    if (blob.size < 500) return; // Umbral reducido de 1000 a 500 bytes
+    // Descartar chunks menores a 10KB — Whisper necesita mínimo ~0.01s de audio real
+    // Un webm de 90s de audio real pesa típicamente 100-2000KB
+    if (blob.size < 10000) {
+      console.warn(`Chunk ${chunkNum} descartado: muy pequeño (${(blob.size/1024).toFixed(1)}KB) — posiblemente sin audio`);
+      return;
+    }
     const formData = new FormData();
     formData.append('audio', blob, `chunk_${chunkNum}.webm`);
     formData.append('meetingId', meetingIdToUse);
