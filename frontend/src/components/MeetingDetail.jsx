@@ -28,10 +28,7 @@ function generarPDF(acta, meeting) {
   };
 
   const checkPage = (needed = 10) => {
-    if (y + needed > pageH - 20) {
-      doc.addPage();
-      y = 20;
-    }
+    if (y + needed > pageH - 20) { doc.addPage(); y = 20; }
   };
 
   const sectionTitle = (text) => {
@@ -52,33 +49,24 @@ function generarPDF(acta, meeting) {
     doc.setFontSize(9);
     doc.setTextColor(...colors.darkGray);
     const lines = doc.splitTextToSize(String(text), contentW);
-    lines.forEach(line => {
-      checkPage(6);
-      doc.text(line, margin, y);
-      y += 5;
-    });
+    lines.forEach(line => { checkPage(6); doc.text(line, margin, y); y += 5; });
     y += 4;
   };
 
-  // ── ENCABEZADO ───────────────────────────────────────────────
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(14);
   doc.setTextColor(...colors.black);
   doc.text('ACTA DE REUNIÓN', pageW / 2, y, { align: 'center' });
   y += 10;
-
   doc.setFontSize(9);
   doc.setFont('helvetica', 'normal');
   doc.text(`Generado el ${new Date().toLocaleDateString('es-ES')}`, pageW / 2, y, { align: 'center' });
   y += 12;
 
-  // ── IDENTIFICACIÓN ───────────────────────────────────────────
   sectionTitle('Identificación');
-
   const id = acta.identificacion || {};
   const startedDate = meeting?.started_at ? new Date(meeting.started_at) : null;
   const endedDate = meeting?.ended_at ? new Date(meeting.ended_at) : null;
-
   const rows = [
     ['Cliente', id.cliente],
     ['Proyecto', id.proyecto],
@@ -88,7 +76,6 @@ function generarPDF(acta, meeting) {
     ['Hora fin', id.hora_fin || (endedDate ? endedDate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '')],
     ['Participantes', Array.isArray(id.participantes) ? id.participantes.join(', ') : id.participantes],
   ];
-
   rows.forEach(([label, value]) => {
     checkPage(6);
     doc.setFont('helvetica', 'bold');
@@ -97,109 +84,83 @@ function generarPDF(acta, meeting) {
     doc.text(String(value || '—'), margin + 40, y);
     y += 6;
   });
-
   y += 6;
 
-  // ── TAREAS ANTERIORES ─────────────────────────────────────────
   sectionTitle('Tareas Anteriores');
-
   const tareasAnt = acta.tareas_anteriores || [];
-
   if (tareasAnt.length === 0) {
-    doc.setFontSize(9);
-    doc.setTextColor(...colors.gray);
-    doc.text('No hay tareas anteriores registradas.', margin, y);
-    y += 8;
+    doc.setFontSize(9); doc.setTextColor(...colors.gray);
+    doc.text('No hay tareas anteriores registradas.', margin, y); y += 8;
   } else {
     autoTable(doc, {
-      startY: y,
-      margin: { left: margin, right: margin },
+      startY: y, margin: { left: margin, right: margin },
       head: [['ID', 'Descripción', 'Responsable', 'Estado', 'Proyecto']],
-      body: tareasAnt.map((t, i) => [
-        t.id || i + 1,
-        t.descripcion || '',
-        t.responsable || '',
-        t.estado || '',
-        t.proyecto || id.proyecto || ''
-      ]),
-      styles: {
-        fontSize: 8.5,
-        cellPadding: 3,
-        textColor: colors.black,
-        lineColor: colors.border,
-        lineWidth: 0.1
-      },
-      headStyles: {
-        fillColor: colors.lightGray,
-        textColor: colors.black,
-        fontStyle: 'bold'
-      }
+      body: tareasAnt.map((t, i) => [t.id || i + 1, t.descripcion || '', t.responsable || '', t.estado || '', t.proyecto || id.proyecto || '']),
+      styles: { fontSize: 8.5, cellPadding: 3, textColor: colors.black, lineColor: colors.border, lineWidth: 0.1 },
+      headStyles: { fillColor: colors.lightGray, textColor: colors.black, fontStyle: 'bold' }
     });
     y = doc.lastAutoTable.finalY + 8;
   }
 
-  // ── TAREAS NUEVAS ────────────────────────────────────────────
   sectionTitle('Tareas Nuevas');
-
   const tareasNuevas = acta.tareas_nuevas || [];
-
   if (tareasNuevas.length === 0) {
-    doc.setFontSize(9);
-    doc.setTextColor(...colors.gray);
-    doc.text('No hay tareas nuevas.', margin, y);
-    y += 8;
+    doc.setFontSize(9); doc.setTextColor(...colors.gray);
+    doc.text('No hay tareas nuevas.', margin, y); y += 8;
   } else {
     autoTable(doc, {
-      startY: y,
-      margin: { left: margin, right: margin },
+      startY: y, margin: { left: margin, right: margin },
       head: [['ID', 'Descripción', 'Responsable', 'Fecha fin', 'Proyecto']],
-      body: tareasNuevas.map((t, i) => [
-        t.id || `T-${i + 1}`,
-        t.descripcion || '',
-        t.responsable || '',
-        t.fecha_compromiso || '',
-        t.proyecto || id.proyecto || ''
-      ]),
-      styles: {
-        fontSize: 8.5,
-        cellPadding: 3,
-        textColor: colors.black,
-        lineColor: colors.border,
-        lineWidth: 0.1
-      },
-      headStyles: {
-        fillColor: colors.lightGray,
-        textColor: colors.black,
-        fontStyle: 'bold'
-      }
+      body: tareasNuevas.map((t, i) => [t.id || `T-${i + 1}`, t.descripcion || '', t.responsable || '', t.fecha_compromiso || '', t.proyecto || id.proyecto || '']),
+      styles: { fontSize: 8.5, cellPadding: 3, textColor: colors.black, lineColor: colors.border, lineWidth: 0.1 },
+      headStyles: { fillColor: colors.lightGray, textColor: colors.black, fontStyle: 'bold' }
     });
     y = doc.lastAutoTable.finalY + 8;
   }
 
-  // ── RESUMEN ───────────────────────────────────────────────────
   sectionTitle('Resumen de la Reunión');
   textBlock(acta.resumen_reunion);
 
-  // ── OBSERVACIONES ────────────────────────────────────────────
   if (acta.observaciones_generales) {
     sectionTitle('Observaciones Generales');
     textBlock(acta.observaciones_generales);
   }
 
-  // ── PIE DE PÁGINA ────────────────────────────────────────────
   const totalPages = doc.internal.getNumberOfPages();
   for (let i = 1; i <= totalPages; i++) {
     doc.setPage(i);
-    doc.setFontSize(7.5);
-    doc.setTextColor(...colors.gray);
+    doc.setFontSize(7.5); doc.setTextColor(...colors.gray);
     doc.text(`Página ${i} de ${totalPages}`, pageW - margin, pageH - 10, { align: 'right' });
     doc.text('Documento generado automáticamente', margin, pageH - 10);
   }
 
   const clienteFile = id.cliente ? id.cliente.replace(/[^a-z0-9]/gi, '_') : 'acta';
   const fechaFile = id.fecha ? id.fecha.replace(/-/g, '') : 'sin_fecha';
-
   doc.save(`Acta_${clienteFile}_${fechaFile}.pdf`);
+}
+
+// ─── Sincronización bidireccional ──────────────────────────────────────────────
+
+// Propaga cambios del array tareasDraft hacia el JSON del acta (por tarea_id)
+function syncTareasToActa(actaDraft, tareasDraft) {
+  if (!actaDraft) return actaDraft;
+  const mapTarea = (t) => {
+    const match = tareasDraft.find(td => td.tarea_id && td.tarea_id === t.id);
+    if (!match) return t;
+    return { ...t, descripcion: match.descripcion ?? t.descripcion, responsable: match.responsable ?? t.responsable, estado: match.estado ?? t.estado, fecha_compromiso: match.fecha_compromiso ?? t.fecha_compromiso };
+  };
+  return { ...actaDraft, tareas_nuevas: (actaDraft.tareas_nuevas || []).map(mapTarea), tareas_anteriores: (actaDraft.tareas_anteriores || []).map(mapTarea) };
+}
+
+// Propaga cambios del JSON del acta hacia el array tareasDraft (por tarea_id)
+function syncActaToTareas(tareasDraft, actaDraft) {
+  if (!actaDraft) return tareasDraft;
+  const todasEnActa = [...(actaDraft.tareas_nuevas || []), ...(actaDraft.tareas_anteriores || [])];
+  return tareasDraft.map(t => {
+    const match = todasEnActa.find(ta => ta.id && ta.id === t.tarea_id);
+    if (!match) return t;
+    return { ...t, descripcion: match.descripcion ?? t.descripcion, responsable: match.responsable ?? t.responsable, estado: match.estado ?? t.estado, fecha_compromiso: match.fecha_compromiso ?? t.fecha_compromiso };
+  });
 }
 
 // ─── Componente principal ──────────────────────────────────────────────────────
@@ -224,7 +185,6 @@ function MeetingDetail() {
     fetchMeetingData();
     const isEditing = editingActa || Object.keys(editingRows).length > 0;
     const isCompleted = meeting?.status === 'completed';
-    // FIX: detener polling cuando el acta ya está lista para no sobrecargar el servidor
     if (!isEditing && !isCompleted) {
       const interval = setInterval(fetchMeetingData, 5000);
       return () => clearInterval(interval);
@@ -244,7 +204,6 @@ function MeetingDetail() {
       if (transcriptionRes.ok) setTranscription(await transcriptionRes.json());
       if (actaRes && actaRes.ok) {
         const actaData = await actaRes.json();
-        // FIX: el backend envuelve el acta en { status, acta: {...} }
         const actaObj = actaData?.acta || actaData;
         setActa(actaObj);
         if (!actaDirty && !editingActa) setActaDraft(actaObj);
@@ -267,7 +226,13 @@ function MeetingDetail() {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(actaDraft)
       });
       if (!res.ok) { alert(`Error al guardar (${res.status})`); setSavingActa(false); return; }
-      setActa(actaDraft); setActaDirty(false); setEditingActa(false);
+      setActa(actaDraft);
+      setActaDirty(false);
+      setEditingActa(false);
+      // ── SYNC: propagar cambios del acta → tareas ──
+      const tareasActualizadas = syncActaToTareas(tareasDraft, actaDraft);
+      setTareasDraft(tareasActualizadas);
+      setTareas(tareasActualizadas);
       alert('Acta guardada correctamente');
     } catch (e) { alert('Error: ' + e.message); }
     setSavingActa(false);
@@ -285,7 +250,13 @@ function MeetingDetail() {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
       });
       if (!res.ok) { alert(`Error al guardar tareas (${res.status})`); setSavingTareas(false); return; }
-      setTareas(tareasDraft); setTareasDirty(false); setEditingRows({});
+      setTareas(tareasDraft);
+      setTareasDirty(false);
+      setEditingRows({});
+      // ── SYNC: propagar cambios de tareas → acta ──
+      const actaActualizada = syncTareasToActa(actaDraft, tareasDraft);
+      setActaDraft(actaActualizada);
+      setActa(actaActualizada);
       alert('Tareas guardadas correctamente');
     } catch (e) { alert('Error: ' + e.message); }
     setSavingTareas(false);
@@ -310,11 +281,96 @@ function MeetingDetail() {
     border: 'none', borderRadius: 4, cursor: 'pointer', fontWeight: active ? 'bold' : 'normal'
   });
 
+  const inputStyle = {
+    width: '100%', padding: '4px 8px', border: '1px solid #90CAF9',
+    borderRadius: 3, fontSize: 13, boxSizing: 'border-box', backgroundColor: '#fff'
+  };
+
+  // Helper para editar campos de tareas dentro del acta
+  const setTareaActa = (tipo, idx, field, value) => {
+    setActaDraft(a => {
+      const arr = [...(a[tipo] || [])];
+      arr[idx] = { ...arr[idx], [field]: value };
+      return { ...a, [tipo]: arr };
+    });
+    setActaDirty(true);
+  };
+
+  // Tabla de tareas editable dentro del acta
+  const renderTareasActaEditables = (tipo, label) => {
+    const items = actaDraft?.[tipo] || [];
+    const esTipoNueva = tipo === 'tareas_nuevas';
+
+    return (
+      <div style={{ marginBottom: 16 }}>
+        <h4 style={{ marginBottom: 8, color: '#333' }}>{label}</h4>
+        {items.length === 0 ? (
+          <p style={{ color: '#999', fontSize: 13, fontStyle: 'italic' }}>Sin {label.toLowerCase()}</p>
+        ) : editingActa ? (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ backgroundColor: '#E3F2FD' }}>
+                  <th style={{ padding: '6px 8px', textAlign: 'left', borderBottom: '1px solid #BBDEFB', width: 60 }}>ID</th>
+                  <th style={{ padding: '6px 8px', textAlign: 'left', borderBottom: '1px solid #BBDEFB' }}>Descripción</th>
+                  <th style={{ padding: '6px 8px', textAlign: 'left', borderBottom: '1px solid #BBDEFB', width: 110 }}>Responsable</th>
+                  <th style={{ padding: '6px 8px', textAlign: 'left', borderBottom: '1px solid #BBDEFB', width: 130 }}>Estado</th>
+                  {esTipoNueva && <th style={{ padding: '6px 8px', textAlign: 'left', borderBottom: '1px solid #BBDEFB', width: 120 }}>Fecha</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((t, idx) => (
+                  <tr key={idx} style={{ borderBottom: '1px solid #eee', backgroundColor: idx % 2 === 0 ? 'white' : '#fafafa' }}>
+                    <td style={{ padding: '4px 6px' }}>
+                      <input value={t.id || ''} onChange={e => setTareaActa(tipo, idx, 'id', e.target.value)} style={{ ...inputStyle, width: 55 }} />
+                    </td>
+                    <td style={{ padding: '4px 6px' }}>
+                      <input value={t.descripcion || ''} onChange={e => setTareaActa(tipo, idx, 'descripcion', e.target.value)} style={inputStyle} />
+                    </td>
+                    <td style={{ padding: '4px 6px' }}>
+                      <input value={t.responsable || ''} onChange={e => setTareaActa(tipo, idx, 'responsable', e.target.value)} style={inputStyle} />
+                    </td>
+                    <td style={{ padding: '4px 6px' }}>
+                      <select value={t.estado || 'pendiente'} onChange={e => setTareaActa(tipo, idx, 'estado', e.target.value)} style={{ ...inputStyle }}>
+                        {['pendiente', 'en progreso', 'completada', 'cancelada'].map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </td>
+                    {esTipoNueva && (
+                      <td style={{ padding: '4px 6px' }}>
+                        <input type="date" value={t.fecha_compromiso || ''} onChange={e => setTareaActa(tipo, idx, 'fecha_compromiso', e.target.value)} style={inputStyle} />
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <ul style={{ paddingLeft: 18, fontSize: 13 }}>
+            {items.map((t, i) => (
+              <li key={i} style={{ marginBottom: 5 }}>
+                <strong>{t.id || `${i + 1}`}:</strong> {t.descripcion}
+                {t.responsable && <span style={{ color: '#1565C0' }}> — {t.responsable}</span>}
+                {t.estado && t.estado !== 'pendiente' && (
+                  <span style={{
+                    marginLeft: 6, padding: '1px 6px', borderRadius: 8, fontSize: 11, fontWeight: 'bold',
+                    backgroundColor: t.estado === 'completada' ? '#c8e6c9' : t.estado === 'en progreso' ? '#fff9c4' : '#ffecb3',
+                    color: t.estado === 'completada' ? '#2e7d32' : t.estado === 'en progreso' ? '#f57f17' : '#e65100'
+                  }}>{t.estado}</span>
+                )}
+                {esTipoNueva && t.fecha_compromiso && <span style={{ color: '#777' }}> · {t.fecha_compromiso}</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div>
       <h1 style={{ marginBottom: 4 }}>Detalles de Reunión</h1>
 
-      {/* Info resumen */}
       <div style={{ marginBottom: 20, padding: 15, backgroundColor: '#f5f5f5', borderRadius: 8, fontSize: 14 }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 6 }}>
           <div><strong>Estado:</strong> {meeting.status}</div>
@@ -327,7 +383,6 @@ function MeetingDetail() {
         </div>
       </div>
 
-      {/* Tabs */}
       <div style={{ marginBottom: 20 }}>
         {[['transcription', 'Transcripción'], ['acta', 'Acta'], ['tareas', 'Tareas']].map(([k, label]) => (
           <button key={k} onClick={() => setActiveTab(k)} style={tabStyle(activeTab === k)}>{label}</button>
@@ -373,7 +428,6 @@ function MeetingDetail() {
             </div>
           ) : (
             <div>
-              {/* Barra de acciones */}
               <div style={{ marginBottom: 16, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                 <button
                   onClick={() => { if (editingActa) { setActaDraft(acta); setActaDirty(false); } setEditingActa(v => !v); }}
@@ -384,10 +438,7 @@ function MeetingDetail() {
                 <button onClick={saveActa} disabled={!actaDirty || savingActa} style={btnStyle('#2196F3', !actaDirty || savingActa)}>
                   {savingActa ? 'Guardando…' : '💾 Guardar'}
                 </button>
-                <button
-                  onClick={() => generarPDF(actaDraft || acta, meeting)}
-                  style={btnStyle('#E53935')}
-                >
+                <button onClick={() => generarPDF(actaDraft || acta, meeting)} style={btnStyle('#E53935')}>
                   📄 Descargar PDF
                 </button>
                 <button onClick={async () => {
@@ -399,8 +450,13 @@ function MeetingDetail() {
                 </button>
               </div>
 
+              {editingActa && (
+                <div style={{ marginBottom: 12, padding: '8px 14px', backgroundColor: '#E3F2FD', borderRadius: 6, fontSize: 13, color: '#1565C0', borderLeft: '3px solid #2196F3' }}>
+                  ✏️ Modo edición activo — los cambios en tareas se sincronizarán con la pestaña <strong>Tareas</strong> al guardar.
+                </div>
+              )}
+
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                {/* Vista */}
                 <div style={{ padding: 16, border: '1px solid #eee', borderRadius: 8 }}>
                   <h3 style={{ marginBottom: 14, color: '#1565C0' }}>Vista del Acta</h3>
 
@@ -415,14 +471,12 @@ function MeetingDetail() {
                             <div style={{ fontWeight: 'bold', color: '#555' }}>{k.replace('_', ' ')}</div>
                             {editingActa ? (
                               <input
-                                defaultValue={val}
-                                onBlur={e => {
-                                  if (e.target.value !== val) {
-                                    setActaDraft(a => ({ ...a, identificacion: { ...(a.identificacion || {}), [k]: e.target.value } }));
-                                    setActaDirty(true);
-                                  }
+                                value={val}
+                                onChange={e => {
+                                  setActaDraft(a => ({ ...a, identificacion: { ...(a.identificacion || {}), [k]: e.target.value } }));
+                                  setActaDirty(true);
                                 }}
-                                style={{ padding: '4px 8px', border: '1px solid #ddd', borderRadius: 3, fontSize: 13 }}
+                                style={{ padding: '4px 8px', border: '1px solid #90CAF9', borderRadius: 3, fontSize: 13 }}
                                 type={k.includes('hora') ? 'time' : k === 'fecha' ? 'date' : 'text'}
                               />
                             ) : <div>{val || '—'}</div>}
@@ -432,67 +486,48 @@ function MeetingDetail() {
                       <div style={{ fontWeight: 'bold', color: '#555' }}>participantes</div>
                       {editingActa ? (
                         <input
-                          defaultValue={(actaDraft.identificacion?.participantes || []).join(', ')}
-                          onBlur={e => {
+                          value={(actaDraft.identificacion?.participantes || []).join(', ')}
+                          onChange={e => {
                             const arr = e.target.value.split(/[,;]/).map(s => s.trim()).filter(Boolean);
                             setActaDraft(a => ({ ...a, identificacion: { ...(a.identificacion || {}), participantes: arr } }));
                             setActaDirty(true);
                           }}
-                          style={{ padding: '4px 8px', border: '1px solid #ddd', borderRadius: 3, fontSize: 13 }}
+                          style={{ padding: '4px 8px', border: '1px solid #90CAF9', borderRadius: 3, fontSize: 13 }}
                         />
                       ) : <div>{(actaDraft.identificacion?.participantes || []).join(', ') || '—'}</div>}
                     </div>
                   </div>
 
-                  {/* Tareas anteriores */}
-                  <h4 style={{ marginBottom: 6, color: '#333' }}>Tareas Anteriores</h4>
-                  {(actaDraft.tareas_anteriores || []).length === 0
-                    ? <p style={{ color: '#999', fontSize: 13, fontStyle: 'italic' }}>Sin tareas anteriores</p>
-                    : <ul style={{ paddingLeft: 18, fontSize: 13 }}>
-                        {actaDraft.tareas_anteriores.map((t, i) => (
-                          <li key={i} style={{ marginBottom: 5 }}>
-                            <strong>{t.id || `${i + 1}`}:</strong> {t.descripcion}
-                            {t.responsable && ` — ${t.responsable}`}
-                          </li>
-                        ))}
-                      </ul>}
+                  {/* Tareas — ahora editables inline */}
+                  {renderTareasActaEditables('tareas_anteriores', 'Tareas Anteriores')}
+                  {renderTareasActaEditables('tareas_nuevas', 'Tareas Nuevas')}
 
-                  {/* Tareas nuevas */}
-                  <h4 style={{ marginTop: 12, marginBottom: 6, color: '#333' }}>Tareas Nuevas</h4>
-                  {(actaDraft.tareas_nuevas || []).length === 0
-                    ? <p style={{ color: '#999', fontSize: 13, fontStyle: 'italic' }}>Sin tareas nuevas</p>
-                    : <ul style={{ paddingLeft: 18, fontSize: 13 }}>
-                        {actaDraft.tareas_nuevas.map((t, i) => (
-                          <li key={i} style={{ marginBottom: 5 }}>
-                            <strong>{t.id || `tarea_${i + 1}`}:</strong> {t.descripcion}
-                            {t.responsable && <span style={{ color: '#1565C0' }}> — {t.responsable}</span>}
-                            {t.fecha_compromiso && <span style={{ color: '#777' }}> · {t.fecha_compromiso}</span>}
-                          </li>
-                        ))}
-                      </ul>}
-
-                  {/* Resumen */}
+                  {/* Resumen — controlado con onChange */}
                   <h4 style={{ marginTop: 12, marginBottom: 6, color: '#333' }}>Resumen</h4>
-                  {editingActa
-                    ? <textarea
-                        defaultValue={actaDraft.resumen_reunion || ''}
-                        onBlur={e => { if (e.target.value !== (actaDraft.resumen_reunion || '')) { setActaDraft(a => ({ ...a, resumen_reunion: e.target.value })); setActaDirty(true); } }}
-                        style={{ width: '100%', minHeight: 80, padding: 8, border: '1px solid #ddd', borderRadius: 4, fontSize: 13 }}
-                      />
-                    : <p style={{ fontSize: 13, lineHeight: 1.6, color: '#333' }}>{actaDraft.resumen_reunion || '—'}</p>}
+                  {editingActa ? (
+                    <textarea
+                      value={actaDraft.resumen_reunion || ''}
+                      onChange={e => { setActaDraft(a => ({ ...a, resumen_reunion: e.target.value })); setActaDirty(true); }}
+                      style={{ width: '100%', minHeight: 80, padding: 8, border: '1px solid #90CAF9', borderRadius: 4, fontSize: 13, boxSizing: 'border-box', resize: 'vertical' }}
+                    />
+                  ) : (
+                    <p style={{ fontSize: 13, lineHeight: 1.6, color: '#333' }}>{actaDraft.resumen_reunion || '—'}</p>
+                  )}
 
-                  {/* Observaciones */}
+                  {/* Observaciones — controlado con onChange */}
                   <h4 style={{ marginTop: 12, marginBottom: 6, color: '#333' }}>Observaciones</h4>
-                  {editingActa
-                    ? <textarea
-                        defaultValue={actaDraft.observaciones_generales || ''}
-                        onBlur={e => { if (e.target.value !== (actaDraft.observaciones_generales || '')) { setActaDraft(a => ({ ...a, observaciones_generales: e.target.value })); setActaDirty(true); } }}
-                        style={{ width: '100%', minHeight: 60, padding: 8, border: '1px solid #ddd', borderRadius: 4, fontSize: 13 }}
-                      />
-                    : <p style={{ fontSize: 13, lineHeight: 1.6, color: '#333' }}>{actaDraft.observaciones_generales || '—'}</p>}
+                  {editingActa ? (
+                    <textarea
+                      value={actaDraft.observaciones_generales || ''}
+                      onChange={e => { setActaDraft(a => ({ ...a, observaciones_generales: e.target.value })); setActaDirty(true); }}
+                      style={{ width: '100%', minHeight: 60, padding: 8, border: '1px solid #90CAF9', borderRadius: 4, fontSize: 13, boxSizing: 'border-box', resize: 'vertical' }}
+                    />
+                  ) : (
+                    <p style={{ fontSize: 13, lineHeight: 1.6, color: '#333' }}>{actaDraft.observaciones_generales || '—'}</p>
+                  )}
                 </div>
 
-                {/* JSON */}
+                {/* JSON Raw */}
                 <div style={{ padding: 16, border: '1px solid #eee', borderRadius: 8 }}>
                   <h3 style={{ marginBottom: 10 }}>JSON Raw</h3>
                   <pre style={{ margin: 0, maxHeight: 580, overflow: 'auto', padding: 12, background: '#f9f9f9', borderRadius: 6, fontSize: 11 }}>
@@ -538,22 +573,22 @@ function MeetingDetail() {
                       <tr key={key} style={{ borderBottom: '1px solid #eee', backgroundColor: idx % 2 === 0 ? 'white' : '#f9f9f9' }}>
                         <td style={{ padding: '8px' }}>
                           {isEdit
-                            ? <input defaultValue={t.tarea_id || ''} onBlur={e => setField('tarea_id', e.target.value)} style={{ width: 70, padding: 4, border: '1px solid #ddd', borderRadius: 3 }} />
+                            ? <input value={t.tarea_id || ''} onChange={e => setField('tarea_id', e.target.value)} style={{ width: 70, padding: 4, border: '1px solid #ddd', borderRadius: 3 }} />
                             : t.tarea_id}
                         </td>
                         <td style={{ padding: '8px' }}>
                           {isEdit
-                            ? <input defaultValue={t.descripcion || ''} onBlur={e => setField('descripcion', e.target.value)} style={{ width: '100%', padding: 4, border: '1px solid #ddd', borderRadius: 3 }} />
+                            ? <input value={t.descripcion || ''} onChange={e => setField('descripcion', e.target.value)} style={{ width: '100%', padding: 4, border: '1px solid #ddd', borderRadius: 3 }} />
                             : t.descripcion}
                         </td>
                         <td style={{ padding: '8px' }}>
                           {isEdit
-                            ? <input defaultValue={t.responsable || ''} onBlur={e => setField('responsable', e.target.value)} style={{ width: 120, padding: 4, border: '1px solid #ddd', borderRadius: 3 }} />
+                            ? <input value={t.responsable || ''} onChange={e => setField('responsable', e.target.value)} style={{ width: 120, padding: 4, border: '1px solid #ddd', borderRadius: 3 }} />
                             : t.responsable}
                         </td>
                         <td style={{ padding: '8px' }}>
                           {isEdit ? (
-                            <select defaultValue={t.estado || 'pendiente'} onChange={e => setField('estado', e.target.value)} style={{ padding: 4, border: '1px solid #ddd', borderRadius: 3 }}>
+                            <select value={t.estado || 'pendiente'} onChange={e => setField('estado', e.target.value)} style={{ padding: 4, border: '1px solid #ddd', borderRadius: 3 }}>
                               {['pendiente', 'en progreso', 'completada', 'cancelada'].map(s => <option key={s} value={s}>{s}</option>)}
                             </select>
                           ) : (
@@ -568,7 +603,7 @@ function MeetingDetail() {
                         </td>
                         <td style={{ padding: '8px' }}>
                           {isEdit
-                            ? <input type="date" defaultValue={t.fecha_compromiso || ''} onBlur={e => setField('fecha_compromiso', e.target.value)} style={{ padding: 4, border: '1px solid #ddd', borderRadius: 3 }} />
+                            ? <input type="date" value={t.fecha_compromiso || ''} onChange={e => setField('fecha_compromiso', e.target.value)} style={{ padding: 4, border: '1px solid #ddd', borderRadius: 3 }} />
                             : t.fecha_compromiso}
                         </td>
                         <td style={{ padding: '8px' }}>
