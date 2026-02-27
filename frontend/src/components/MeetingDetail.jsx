@@ -76,7 +76,7 @@ function generarPDF(acta, meeting) {
   sectionTitle('Tareas Nuevas');
   const tareasNuevas = acta.tareas_nuevas||[];
   if (!tareasNuevas.length) { doc.setFontSize(9); doc.setTextColor(...colors.gray); doc.text('No hay tareas nuevas.', margin, y); y+=8; }
-  else { autoTable(doc,{startY:y,...tableOpts([['ID','Descripción','Responsable','Fecha fin','Proyecto']], tareasNuevas.map((t,i)=>[t.id||`T-${i+1}`,t.descripcion||'',t.responsable||'',t.fecha_compromiso||'',t.proyecto||id.proyecto||'']))}); y=doc.lastAutoTable.finalY+8; }
+  else { autoTable(doc,{startY:y,...tableOpts([['ID','Descripción','Responsable','Fecha fin','Proyecto']], tareasNuevas.map((t,i)=>[t.id||`tarea_${i+1}`,t.descripcion||'',t.responsable||'',t.fecha_compromiso||'',t.proyecto||id.proyecto||'']))}); y=doc.lastAutoTable.finalY+8; }
 
   sectionTitle('Resumen de la Reunión'); textBlock(acta.resumen_reunion);
   if (acta.observaciones_generales) { sectionTitle('Observaciones Generales'); textBlock(acta.observaciones_generales); }
@@ -147,7 +147,7 @@ function ModalEditarTarea({ tarea, onSave, onClose, mostrarFecha = true }) {
           {tarea.id !== undefined && (
             <div>
               <label style={labelStyle}>ID de tarea</label>
-              <input value={form.id||''} onChange={e => set('id', e.target.value)} style={inputStyle} placeholder="Ej: T-001" />
+              <input value={form.id||''} onChange={e => set('id', e.target.value)} style={inputStyle} placeholder="Ej: tarea_001" />
             </div>
           )}
 
