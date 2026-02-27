@@ -349,6 +349,68 @@ function MeetingDetail() {
     }
   };
 
+  // ── Generar ID único para nueva tarea ─────────────────────────────────────
+  const generarIdTarea = (tipo) => {
+    const prefix = tipo === 'tareas_anteriores' ? 'A' : 'T';
+    const existentes = [
+      ...(actaDraft?.tareas_nuevas||[]).map(t=>t.id||''),
+      ...(actaDraft?.tareas_anteriores||[]).map(t=>t.id||''),
+      ...tareasDraft.map(t=>t.tarea_id||'')
+    ];
+    let n = (existentes.length + 1);
+    let candidate = `${prefix}-${String(n).padStart(3,'0')}`;
+    while (existentes.includes(candidate)) { n++; candidate = `${prefix}-${String(n).padStart(3,'0')}`; }
+    return candidate;
+  };
+
+  // ── Agregar tarea desde el Acta ───────────────────────────────────────────
+  const agregarTareaActa = (tipo) => {
+    const newId = generarIdTarea(tipo);
+    const nuevaTareaActa = { id: newId, descripcion: '', responsable: '', estado: 'pendiente', ...(tipo==='tareas_nuevas'?{fecha_compromiso:''}:{}) };
+    const nuevaTareaTab  = { tarea_id: newId, tipo: tipo==='tareas_nuevas'?'nueva':'anterior', descripcion:'', responsable:'', estado:'pendiente', fecha_compromiso:'' };
+    setActaDraft(a => ({ ...a, [tipo]: [...(a[tipo]||[]), nuevaTareaActa] }));
+    setTareasDraft(arr => [...arr, nuevaTareaTab]);
+    setActaDirty(true);
+    setTareasDirty(true);
+    // Abrir modal para completar datos de inmediato
+    const idxNuevo = (actaDraft?.[tipo]||[]).length;
+    setModal({ origen:'acta', tipo, idx: idxNuevo, tarea: nuevaTareaActa });
+  };
+
+  // ── Eliminar tarea desde el Acta ──────────────────────────────────────────
+  const eliminarTareaActa = (tipo, idx) => {
+    const tId = actaDraft?.[tipo]?.[idx]?.id;
+    setActaDraft(a => ({ ...a, [tipo]: (a[tipo]||[]).filter((_,i) => i !== idx) }));
+    if (tId) setTareasDraft(arr => arr.filter(t => t.tarea_id !== tId));
+    setActaDirty(true);
+    setTareasDirty(true);
+  };
+
+  // ── Agregar tarea desde la pestaña Tareas ─────────────────────────────────
+  const agregarTareaTab = () => {
+    const newId = generarIdTarea('tareas_nuevas');
+    const nuevaTareaTab  = { tarea_id: newId, tipo:'nueva', descripcion:'', responsable:'', estado:'pendiente', fecha_compromiso:'' };
+    const nuevaTareaActa = { id: newId, descripcion:'', responsable:'', estado:'pendiente', fecha_compromiso:'' };
+    setTareasDraft(arr => [...arr, nuevaTareaTab]);
+    setActaDraft(a => a ? ({ ...a, tareas_nuevas: [...(a.tareas_nuevas||[]), nuevaTareaActa] }) : a);
+    setTareasDirty(true);
+    setActaDirty(true);
+    // Abrir modal para completar datos
+    setModal({ origen:'tareas', idx: tareasDraft.length, tarea: nuevaTareaTab });
+  };
+
+  // ── Eliminar tarea desde la pestaña Tareas ────────────────────────────────
+  const eliminarTareaTab = (idx) => {
+    const tId = tareasDraft[idx]?.tarea_id;
+    const tipoActa = tareasDraft[idx]?.tipo === 'anterior' ? 'tareas_anteriores' : 'tareas_nuevas';
+    setTareasDraft(arr => arr.filter((_,i) => i !== idx));
+    if (tId && actaDraft) {
+      setActaDraft(a => ({ ...a, [tipoActa]: (a[tipoActa]||[]).filter(t => t.id !== tId) }));
+    }
+    setTareasDirty(true);
+    setActaDirty(true);
+  };
+
   if (loading) return <div style={{ padding:40 }}>Cargando...</div>;
   if (!meeting) return <div style={{ padding:40 }}>Reunión no encontrada</div>;
 
@@ -384,6 +446,13 @@ function MeetingDetail() {
         <div style={{ display:'flex', alignItems:'center', marginBottom:8, gap:8 }}>
           <h4 style={{ margin:0, color:'#333', fontSize:13 }}>{label}</h4>
           <span style={{ fontSize:11, color:'#999', backgroundColor:'#f0f0f0', borderRadius:10, padding:'1px 8px' }}>{items.length}</span>
+          {editingActa && (
+            <button
+              onClick={() => agregarTareaActa(tipo)}
+              title={`Agregar ${label}`}
+              style={{ marginLeft:'auto', padding:'4px 12px', backgroundColor:'#E8F5E9', color:'#2E7D32', border:'1px solid #A5D6A7', borderRadius:5, cursor:'pointer', fontSize:12, fontWeight:600 }}
+            >➕ Agregar</button>
+          )}
         </div>
         {items.length === 0 ? (
           <p style={{ color:'#bbb', fontSize:13, fontStyle:'italic', margin:0 }}>Sin {label.toLowerCase()}</p>
@@ -404,20 +473,22 @@ function MeetingDetail() {
                       <span style={{ fontSize:11, color:'#777' }}>📅 {t.fecha_compromiso}</span>
                     )}
                   </div>
-                  <div style={{ fontSize:13, color:'#333', lineHeight:1.4, marginBottom: t.responsable?2:0 }}>{t.descripcion}</div>
+                  <div style={{ fontSize:13, color:'#333', lineHeight:1.4, marginBottom: t.responsable?2:0 }}>{t.descripcion||<em style={{color:'#bbb'}}>Sin descripción</em>}</div>
                   {t.responsable && <div style={{ fontSize:12, color:'#666' }}>👤 {t.responsable}</div>}
                 </div>
                 {editingActa && (
-                  <button
-                    onClick={() => abrirModalActa(tipo, i)}
-                    title="Editar tarea"
-                    style={{
-                      flexShrink:0, width:30, height:30, border:'1px solid #ddd',
-                      borderRadius:6, backgroundColor:'white', cursor:'pointer',
-                      fontSize:14, display:'flex', alignItems:'center', justifyContent:'center',
-                      color:'#555', transition:'background .15s'
-                    }}
-                  >✏️</button>
+                  <div style={{ display:'flex', gap:4, flexShrink:0 }}>
+                    <button
+                      onClick={() => abrirModalActa(tipo, i)}
+                      title="Editar tarea"
+                      style={{ width:30, height:30, border:'1px solid #ddd', borderRadius:6, backgroundColor:'white', cursor:'pointer', fontSize:14, display:'flex', alignItems:'center', justifyContent:'center', color:'#555' }}
+                    >✏️</button>
+                    <button
+                      onClick={() => { if (confirm(`¿Eliminar tarea ${t.id||`#${i+1}`}?`)) eliminarTareaActa(tipo, i); }}
+                      title="Eliminar tarea"
+                      style={{ width:30, height:30, border:'1px solid #ffcdd2', borderRadius:6, backgroundColor:'#fff8f8', cursor:'pointer', fontSize:14, display:'flex', alignItems:'center', justifyContent:'center', color:'#c62828' }}
+                    >🗑️</button>
+                  </div>
                 )}
               </div>
             ))}
@@ -624,13 +695,17 @@ function MeetingDetail() {
         <div>
           <h2>Tareas</h2>
           {tareasDraft.length===0 ? (
-            <p style={{ color:'#666' }}>No hay tareas registradas.</p>
+            <div>
+              <p style={{ color:'#666' }}>No hay tareas registradas.</p>
+              <button onClick={agregarTareaTab} style={btnStyle('#2E7D32')}>➕ Agregar tarea</button>
+            </div>
           ) : (
             <div>
-              <div style={{ marginBottom:12 }}>
+              <div style={{ marginBottom:12, display:'flex', flexWrap:'wrap', gap:6, alignItems:'center' }}>
                 <button onClick={saveTareas} disabled={!tareasDirty||savingTareas} style={btnStyle('#1565C0', !tareasDirty||savingTareas)}>
                   {savingTareas ? 'Guardando…' : '💾 Guardar cambios'}
                 </button>
+                <button onClick={agregarTareaTab} style={btnStyle('#2E7D32')}>➕ Agregar tarea</button>
                 {tareasDirty && <span style={{ fontSize:12, color:'#e65100', marginLeft:4 }}>● Cambios sin guardar</span>}
               </div>
               <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
@@ -646,20 +721,22 @@ function MeetingDetail() {
                     <tr key={t.id??`t_${idx}`} style={{ borderBottom:'1px solid #eee', backgroundColor: idx%2===0?'white':'#fafbfc' }}>
                       <td style={{ padding:'10px', fontSize:12, color:'#1565C0', fontWeight:600 }}>{t.tarea_id||'—'}</td>
                       <td style={{ padding:'10px', maxWidth:260 }}>
-                        <div style={{ fontSize:13, color:'#333', lineHeight:1.4 }}>{t.descripcion}</div>
+                        <div style={{ fontSize:13, color:'#333', lineHeight:1.4 }}>{t.descripcion||<em style={{color:'#bbb'}}>Sin descripción</em>}</div>
                       </td>
                       <td style={{ padding:'10px', fontSize:13, color:'#555' }}>{t.responsable||'—'}</td>
                       <td style={{ padding:'10px' }}>
                         <span style={estadoBadge(t.estado||'pendiente')}>{t.estado||'pendiente'}</span>
                       </td>
                       <td style={{ padding:'10px', fontSize:13, color:'#666' }}>{t.fecha_compromiso||'—'}</td>
-                      <td style={{ padding:'10px' }}>
+                      <td style={{ padding:'10px', display:'flex', gap:6 }}>
                         <button
                           onClick={() => abrirModalTareas(idx)}
-                          style={{ padding:'6px 14px', backgroundColor:'#E3F2FD', color:'#1565C0', border:'1px solid #90CAF9', borderRadius:5, cursor:'pointer', fontSize:12, fontWeight:600 }}
-                        >
-                          ✏️ Editar
-                        </button>
+                          style={{ padding:'6px 12px', backgroundColor:'#E3F2FD', color:'#1565C0', border:'1px solid #90CAF9', borderRadius:5, cursor:'pointer', fontSize:12, fontWeight:600 }}
+                        >✏️ Editar</button>
+                        <button
+                          onClick={() => { if (confirm(`¿Eliminar tarea ${t.tarea_id||`#${idx+1}`}? También se eliminará del acta.`)) eliminarTareaTab(idx); }}
+                          style={{ padding:'6px 12px', backgroundColor:'#fff8f8', color:'#c62828', border:'1px solid #ffcdd2', borderRadius:5, cursor:'pointer', fontSize:12, fontWeight:600 }}
+                        >🗑️</button>
                       </td>
                     </tr>
                   ))}
