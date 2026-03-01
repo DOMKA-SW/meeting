@@ -7,26 +7,53 @@ const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
 const OpenAI = require('openai');
+const jwt = require('jsonwebtoken');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
 const app = express();
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
+
+// ─── CORS: permitir Authorization header ─────────────────────────────────────
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use((req, res, next) => { console.log(`${new Date().toISOString()} ${req.method} ${req.path}`); next(); });
 
 // ─── Config ──────────────────────────────────────────────────────────────────
-const SECTION_SIZE = 12;        // chunks por sección (~18 min con chunks de 90s)
+const SECTION_SIZE    = 12;     // chunks por sección (~18 min con chunks de 90s)
 const WORDS_PER_CHUNK = 2500;   // fallback para texto manual largo
-const SPEAKER_BATCH = 60;       // líneas por batch de speaker improvement
+const SPEAKER_BATCH   = 60;     // líneas por batch de speaker improvement
 
-const dbDir = path.join(__dirname, '..', 'storage', 'db');
-const storagePath = path.join(__dirname, '..', 'storage', 'audio');
-const dbPath = path.join(dbDir, 'meetings.db');
-fs.mkdirSync(dbDir, { recursive: true });
-fs.mkdirSync(storagePath, { recursive: true });
+const dbDir          = path.join(__dirname, '..', 'storage', 'db');
+const storagePath    = path.join(__dirname, '..', 'storage', 'audio');
+const attachmentPath = path.join(__dirname, '..', 'storage', 'attachments');
+const dbPath         = path.join(dbDir, 'meetings.db');
+fs.mkdirSync(dbDir,          { recursive: true });
+fs.mkdirSync(storagePath,    { recursive: true });
+fs.mkdirSync(attachmentPath, { recursive: true });
 
+// ─── Auth ────────────────────────────────────────────────────────────────────
+const JWT_SECRET   = process.env.JWT_SECRET   || 'meeting-secret-change-in-production';
+const APP_PASSWORD = process.env.APP_PASSWORD || 'actas2025';
+
+const authMiddleware = (req, res, next) => {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Autenticación requerida' });
+  }
+  try {
+    req.user = jwt.verify(header.split(' ')[1], JWT_SECRET);
+    next();
+  } catch {
+    return res.status(403).json({ error: 'Token inválido o expirado. Inicia sesión de nuevo.' });
+  }
+};
+
+// ─── Base de datos ────────────────────────────────────────────────────────────
 const db = new sqlite3.Database(dbPath);
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS meetings (
@@ -47,7 +74,6 @@ db.serialize(() => {
     chunk_number INTEGER, speaker TEXT, text TEXT, timestamp TEXT
   )`);
 
-  // Nueva tabla: resúmenes progresivos por sección
   db.run(`CREATE TABLE IF NOT EXISTS section_summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT,
     section_num INTEGER, from_chunk INTEGER, to_chunk INTEGER,
@@ -65,8 +91,30 @@ db.serialize(() => {
     tipo TEXT, descripcion TEXT, responsable TEXT,
     estado TEXT DEFAULT 'pendiente', fecha_compromiso TEXT
   )`);
+
+  // ── NUEVAS TABLAS ──────────────────────────────────────────────────────────
+  db.run(`CREATE TABLE IF NOT EXISTS meeting_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    author TEXT DEFAULT '',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS meeting_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    file_type TEXT NOT NULL,
+    mime_type TEXT DEFAULT '',
+    transcription TEXT,
+    transcription_status TEXT DEFAULT 'pending',
+    uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
 });
 
+// ─── Groq / LLM ──────────────────────────────────────────────────────────────
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 if (!GROQ_API_KEY) console.warn('⚠️  GROQ_API_KEY no definida');
 else console.log('Groq key:', GROQ_API_KEY.slice(0,10) + '...');
@@ -87,21 +135,21 @@ const addBusinessDays = (startDate, days) => {
   return date.toISOString().split('T')[0];
 };
 
-// LLM con retry y modelo configurable
-const callLLM = async (prompt, model = 'llama-3.1-8b-instant', retries = 2) => {
+const callLLM = async (prompt, model = 'llama-3.3-70b-versatile', retries = 3) => {
   for (let i = 0; i <= retries; i++) {
     try {
       const completion = await groq.chat.completions.create({
         model,
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1,
+        temperature: 0.15,
         response_format: { type: 'json_object' }
       });
       return completion.choices?.[0]?.message?.content || null;
     } catch (e) {
       if (e.status === 429 && i < retries) {
-        console.warn(`Rate limit, esperando ${(i+1)*5}s...`);
-        await sleep((i+1) * 5000);
+        const wait = (i + 1) * 8000;
+        console.warn(`Rate limit, esperando ${wait/1000}s...`);
+        await sleep(wait);
       } else {
         console.error('LLM error:', e.message);
         throw e;
@@ -119,48 +167,51 @@ const parseJSON = (raw) => {
   }
 };
 
-// ─── Speaker Improvement (modelo rápido, por sección) ─────────────────────────
+// ─── Speaker Improvement ──────────────────────────────────────────────────────
 const improveSpeakersInSection = async (transcriptions, participantes = [], speakerRegistry = {}) => {
   if (!GROQ_API_KEY || transcriptions.length === 0) return transcriptions;
 
   const result = [...transcriptions];
   const knownNames = Object.values(speakerRegistry).filter(v => v && !v.startsWith('Speaker'));
-  const hint = participantes.length > 0
-    ? `Participantes conocidos: ${participantes.join(', ')}.`
+  const participantesHint = participantes.length > 0
+    ? `PARTICIPANTES CONFIRMADOS EN ESTA REUNIÓN: ${participantes.join(', ')}.
+Usa estos nombres EXACTAMENTE cuando identifiques quién habla.
+Si el contenido sugiere que habla uno de ellos, asígnalo con su nombre real.`
     : knownNames.length > 0
-      ? `Speakers identificados hasta ahora: ${knownNames.join(', ')}.`
-      : '';
+      ? `Speakers ya identificados en secciones anteriores: ${knownNames.join(', ')}.`
+      : 'No hay información previa de participantes.';
 
   for (let start = 0; start < transcriptions.length; start += SPEAKER_BATCH) {
     const batch = transcriptions.slice(start, start + SPEAKER_BATCH);
     const lines = batch.map((t, i) => `[${start + i}]: ${t.text}`).join('\n');
 
-    const prompt = `Eres un experto en diarización de reuniones. ${hint}
+    const prompt = `Eres un experto en diarización de reuniones corporativas en español.
 
-Asigna quién habla en cada línea numerada. Detecta cambios de speaker por:
-- Preguntas y respuestas (distintos speakers)
-- Cambios de perspectiva o tema
-- Referencias a otros ("como dijo X...", "¿Y tú qué opinas?")
-- Cambios de rol (quien dirige vs quien reporta)
+${participantesHint}
 
-REGLAS:
-- Si puedes inferir el nombre real del participante, úsalo
-- Si no, usa Speaker1, Speaker2, etc. (CONSISTENTE con speakers previos si los conoces)
-- NO inventes nombres que no estén en el audio
+INSTRUCCIONES DE DIARIZACIÓN:
+1. Analiza el CONTENIDO semántico para detectar cambios de hablante:
+   - Preguntas → respuestas (siempre son speakers diferentes)
+   - "Como decía X...", "Yo creo que...", "Desde mi perspectiva..." → cambio de voz
+   - Cambios de rol: quien reporta vs quien decide
+   - Cambio de tema iniciado por alguien nuevo
+2. Mantén CONSISTENCIA: el mismo speaker debe tener el mismo nombre en toda la sesión
+3. Si tienes nombres de participantes, úsalos cuando el contexto lo indique claramente
+4. Si no puedes inferir el nombre, usa Speaker1, Speaker2... (numeración global consistente)
+5. NUNCA inventes nombres que no estén en la lista de participantes
 
 Responde SOLO JSON: {"lines": [{"index": N, "speaker": "Nombre"}]}
 
-Transcripción:
+Transcripción a analizar:
 ${lines}`;
 
     try {
-      const raw = await callLLM(prompt, 'llama-3.1-8b-instant');
+      const raw = await callLLM(prompt, 'llama-3.3-70b-versatile');
       const parsed = parseJSON(raw);
       const linesOut = Array.isArray(parsed?.lines) ? parsed.lines : [];
       for (const line of linesOut) {
         if (line.index >= 0 && line.index < result.length && line.speaker) {
           result[line.index] = { ...result[line.index], speaker: line.speaker };
-          // Actualizar registry
           const origSpeaker = transcriptions[line.index]?.speaker;
           if (origSpeaker && !speakerRegistry[origSpeaker]) {
             speakerRegistry[origSpeaker] = line.speaker;
@@ -174,7 +225,7 @@ ${lines}`;
   return result;
 };
 
-// ─── Resumen de Sección (modelo rápido) ──────────────────────────────────────
+// ─── Resumen de Sección ───────────────────────────────────────────────────────
 const generateSectionSummary = async (meetingId, sectionNum, fromChunk, toChunk) => {
   return new Promise((resolve) => {
     db.all(
@@ -186,15 +237,12 @@ const generateSectionSummary = async (meetingId, sectionNum, fromChunk, toChunk)
       async (err, transcriptions) => {
         if (err || transcriptions.length === 0) return resolve(null);
 
-        // Obtener participantes del meeting
         db.get('SELECT participantes FROM meetings WHERE id = ?', [meetingId], async (_, meeting) => {
           let participantes = [];
           try { participantes = JSON.parse(meeting?.participantes || '[]'); } catch(_) {}
 
-          // Mejorar speakers en esta sección
           const improved = await improveSpeakersInSection(transcriptions, participantes);
 
-          // Guardar speakers mejorados
           for (let i = 0; i < improved.length; i++) {
             if (improved[i].speaker !== transcriptions[i].speaker) {
               db.run('UPDATE transcriptions SET speaker = ? WHERE id = ?',
@@ -203,25 +251,31 @@ const generateSectionSummary = async (meetingId, sectionNum, fromChunk, toChunk)
           }
 
           const transcript = improved.map(t => `[${t.speaker}]: ${t.text}`).join('\n');
-          const sectionMinStart = fromChunk * 1.5; // aprox minutos (chunks de 90s)
-          const sectionMinEnd = (toChunk + 1) * 1.5;
+          const minStart = Math.round(fromChunk * 1.5);
+          const minEnd   = Math.round((toChunk + 1) * 1.5);
 
-          const prompt = `Analiza la sección ${sectionNum} (min ~${Math.round(sectionMinStart)}-${Math.round(sectionMinEnd)}) de esta reunión.
+          const prompt = `Eres un asistente experto en análisis de reuniones corporativas en español.
+Analiza la SECCIÓN ${sectionNum} (aproximadamente minutos ${minStart}–${minEnd}) de esta reunión.
 
-Extrae en JSON COMPACTO solo lo verdaderamente importante:
+CRITERIOS DE EXTRACCIÓN:
+
+Para "temas": temas REALES debatidos, no genéricos. Ej: "Revisión del módulo de pagos" no "Revisión"
+Para "decisiones": solo acuerdos TOMADOS, no discusiones. Ej: "Se aprobó lanzar en Q2" no "Se habló del lanzamiento"
+Para "tareas": SOLO compromisos EXPLÍCITOS con verbo de acción + objeto concreto:
+  ✅ VÁLIDO: "Juan enviará el contrato al cliente el viernes"
+  ✅ VÁLIDO: "María preparará el prototipo para la próxima sesión"
+  ❌ INVÁLIDO: "Revisar", "Mejorar la situación", "Hacer seguimiento", "Continuar"
+Para "puntos_criticos": alertas, bloqueos, riesgos o temas que requieren atención especial
+Para "resumen": narrativa de 3-4 frases que capture la esencia de esta sección
+
+Responde SOLO JSON válido:
 {
-  "temas": ["tema breve 1", "tema breve 2"],
+  "temas": ["tema específico 1"],
   "decisiones": ["decisión concreta tomada"],
-  "tareas": [
-    {"tarea": "descripción específica y accionable", "quien": "nombre o vacío", "cuando": "fecha mencionada o vacío"}
-  ],
-  "resumen": "2-3 frases densas con el núcleo de esta sección"
+  "tareas": [{"tarea": "acción concreta y específica", "quien": "nombre o vacío", "cuando": "fecha mencionada o vacío"}],
+  "puntos_criticos": ["alerta o bloqueo importante si existe"],
+  "resumen": "narrativa fluida de 3-4 frases de esta sección"
 }
-
-CRÍTICO para tareas:
-- SOLO compromisos EXPLÍCITOS: "Juan va a enviar X el viernes", "María prepara el documento"
-- NUNCA tareas vagas: "revisar", "mejorar", "continuar", "seguir trabajando"
-- Si no hay tareas concretas, deja el array vacío
 
 Transcripción:
 ${transcript}
@@ -229,7 +283,7 @@ ${transcript}
 Responde SOLO JSON válido.`;
 
           try {
-            const raw = await callLLM(prompt, 'llama-3.1-8b-instant');
+            const raw = await callLLM(prompt, 'llama-3.3-70b-versatile');
             const summary = parseJSON(raw);
             if (summary) {
               db.run(
@@ -253,7 +307,6 @@ Responde SOLO JSON válido.`;
   });
 };
 
-// Verificar si toca generar sección tras procesar un chunk
 const checkAndTriggerSectionSummary = (meetingId) => {
   db.get(
     `SELECT COUNT(*) as cnt FROM chunks WHERE meeting_id = ? AND processed = 1`,
@@ -262,15 +315,14 @@ const checkAndTriggerSectionSummary = (meetingId) => {
       const processed = row?.cnt || 0;
       if (processed > 0 && processed % SECTION_SIZE === 0) {
         const sectionNum = Math.floor(processed / SECTION_SIZE);
-        const fromChunk = (sectionNum - 1) * SECTION_SIZE;
-        const toChunk = sectionNum * SECTION_SIZE - 1;
-        // Solo si no existe ya
+        const fromChunk  = (sectionNum - 1) * SECTION_SIZE;
+        const toChunk    = sectionNum * SECTION_SIZE - 1;
         db.get(
           `SELECT id FROM section_summaries WHERE meeting_id = ? AND section_num = ?`,
           [meetingId, sectionNum],
           (_, existing) => {
             if (!existing) {
-              console.log(`[${meetingId}] Disparando resumen sección ${sectionNum} (chunks ${fromChunk}-${toChunk})`);
+              console.log(`[${meetingId}] Disparando resumen sección ${sectionNum}`);
               generateSectionSummary(meetingId, sectionNum, fromChunk, toChunk)
                 .catch(e => console.error('Error sección:', e.message));
             }
@@ -281,10 +333,22 @@ const checkAndTriggerSectionSummary = (meetingId) => {
   );
 };
 
-// ─── Generación de Acta Final (combina secciones) ───────────────────────────
+// ─── Obtener notas y adjuntos de la reunión ───────────────────────────────────
+const getMeetingSupplements = (meetingId) => {
+  return Promise.all([
+    new Promise(resolve =>
+      db.all('SELECT * FROM meeting_notes WHERE meeting_id = ? ORDER BY created_at',
+        [meetingId], (_, r) => resolve(r || []))),
+    new Promise(resolve =>
+      db.all(`SELECT file_name, transcription FROM meeting_attachments
+              WHERE meeting_id = ? AND transcription_status = 'done' AND transcription IS NOT NULL`,
+        [meetingId], (_, r) => resolve(r || [])))
+  ]).then(([notes, audioTranscriptions]) => ({ notes, audioTranscriptions }));
+};
+
+// ─── Generación de Acta Final ──────────────────────────────────────────────────
 const generateActaFromSections = async (meetingId, meta, fechaDefault) => {
   return new Promise((resolve, reject) => {
-    // Obtener todos los resúmenes de sección
     db.all(
       `SELECT section_num, from_chunk, to_chunk, summary_json
        FROM section_summaries WHERE meeting_id = ? ORDER BY section_num`,
@@ -292,19 +356,24 @@ const generateActaFromSections = async (meetingId, meta, fechaDefault) => {
       async (err, sections) => {
         if (err) return reject(err);
 
+        // Obtener notas y transcripciones de audios adicionales
+        const { notes, audioTranscriptions } = await getMeetingSupplements(meetingId);
+
         let actaJson = null;
 
         if (sections.length > 0) {
-          // Combinar secciones en input compacto para LLM
           const sectionInputs = sections.map((s, i) => {
             const sum = parseJSON(s.summary_json) || {};
             const minStart = Math.round(s.from_chunk * 1.5);
-            const minEnd = Math.round((s.to_chunk + 1) * 1.5);
+            const minEnd   = Math.round((s.to_chunk + 1) * 1.5);
+            const puntosStr = (sum.puntos_criticos || []).length > 0
+              ? `\nPuntos críticos: ${(sum.puntos_criticos).join('; ')}`
+              : '';
             return `--- SECCIÓN ${i+1} (min ${minStart}-${minEnd}) ---
 Temas: ${(sum.temas || []).join(', ')}
 Decisiones: ${(sum.decisiones || []).join('; ')}
 Tareas: ${JSON.stringify(sum.tareas || [])}
-Resumen: ${sum.resumen || ''}`;
+Resumen: ${sum.resumen || ''}${puntosStr}`;
           }).join('\n\n');
 
           const allTareas = sections.flatMap(s => {
@@ -316,20 +385,62 @@ Resumen: ${sum.resumen || ''}`;
             }));
           });
 
-          const prompt = `Genera el acta final de esta reunión combinando los resúmenes de ${sections.length} secciones.
+          // Construir sección de fuentes adicionales
+          let fuentesAdicionales = '';
+          if (notes.length > 0) {
+            fuentesAdicionales += `\nNOTAS APORTADAS POR PARTICIPANTES (${notes.length} nota${notes.length > 1 ? 's' : ''}):\n`;
+            fuentesAdicionales += notes.map(n =>
+              `• ${n.author ? `[${n.author}]: ` : ''}${n.content}`
+            ).join('\n');
+          }
+          if (audioTranscriptions.length > 0) {
+            fuentesAdicionales += `\n\nTRANSCRIPCIONES DE AUDIOS ADICIONALES (${audioTranscriptions.length} archivo${audioTranscriptions.length > 1 ? 's' : ''}):\n`;
+            fuentesAdicionales += audioTranscriptions.map(a =>
+              `--- Archivo: ${a.file_name} ---\n${a.transcription}`
+            ).join('\n\n');
+          }
 
-DATOS DE IDENTIFICACIÓN (usa EXACTAMENTE estos):
+          const prompt = `Eres un redactor experto en actas de reunión corporativas. Tu objetivo es producir un documento COMPLETO, CONCRETO y ACCIONABLE.
+
+DATOS DE IDENTIFICACIÓN (usa EXACTAMENTE estos valores):
 cliente="${meta.cliente}", proyecto="${meta.proyecto}", responsable="${meta.responsable}",
 participantes=${JSON.stringify(meta.participantes)}, fecha="${meta.fecha}",
 hora_inicio="${meta.hora_inicio}", hora_fin="${meta.hora_fin}"
 
-RESÚMENES POR SECCIÓN:
+═══════════════════════════════════════
+FUENTE PRINCIPAL: TRANSCRIPCIÓN GRABADA
+═══════════════════════════════════════
 ${sectionInputs}
+${fuentesAdicionales ? `\n═══════════════════════════════════════\nFUENTES COMPLEMENTARIAS\n═══════════════════════════════════════${fuentesAdicionales}` : ''}
 
-TODAS LAS TAREAS IDENTIFICADAS (consolida duplicados):
+TAREAS DETECTADAS EN TRANSCRIPCIÓN (pre-procesadas por sección):
 ${JSON.stringify(allTareas, null, 2)}
 
-Genera JSON:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INSTRUCCIONES DE REDACCIÓN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Para "resumen_reunion" (MUY IMPORTANTE):
+- Escribe 4-6 frases en prosa ejecutiva, fluida y narrativa
+- Debe cubrir: contexto/objetivo de la reunión → temas principales debatidos → decisiones tomadas → próximos pasos
+- Si hay notas o audios adicionales, integra su contenido relevante naturalmente
+- NUNCA hagas listas. Escribe como un párrafo ejecutivo que alguien que no asistió pueda leer y entender todo
+
+Para "tareas_nuevas" (CRÍTICO):
+- CONSOLIDA tareas duplicadas o muy similares entre secciones y fuentes en UNA SOLA tarea
+- INCLUYE tareas detectadas tanto en la grabación como en notas y audios adicionales
+- ELIMINA tareas vagas: "revisar", "mejorar", "hacer seguimiento", "continuar", "coordinar" (sin objeto concreto)
+- Cada tarea debe tener: acción concreta + objeto específico + responsable + fecha
+- Responsable: usa el nombre de un participante o deja vacío si no se mencionó
+- fecha_compromiso: fecha específica si se mencionó, si no usa "${fechaDefault}"
+- Máximo 15 tareas priorizadas por importancia
+- IDs secuenciales: tarea_1, tarea_2...
+
+Para "observaciones_generales":
+- Incluye puntos críticos, bloqueos, riesgos o alertas detectadas
+- Si hay información relevante de las fuentes adicionales que no cabe en el resumen, ponla aquí
+
+Genera este JSON exacto:
 {
   "identificacion": {
     "cliente": "", "proyecto": "", "fecha": "", "hora_inicio": "",
@@ -337,24 +448,13 @@ Genera JSON:
   },
   "tareas_anteriores": [],
   "tareas_nuevas": [
-    {"id": "tarea_1", "descripcion": "descripción clara", "responsable": "nombre", "fecha_compromiso": "${fechaDefault}"}
+    {"id": "tarea_1", "descripcion": "descripción clara y específica", "responsable": "nombre", "fecha_compromiso": "${fechaDefault}"}
   ],
-  "resumen_reunion": "Resumen fluido y coherente de toda la reunión en 4-6 frases, capturando objetivos, temas tratados y conclusiones principales.",
+  "resumen_reunion": "Narrativa ejecutiva fluida de 4-6 frases...",
   "observaciones_generales": ""
 }
 
-REGLAS CRÍTICAS:
-1. resumen_reunion: narrativo y útil, no una lista. Captura el arco completo de la reunión.
-2. tareas_nuevas:
-   - CONSOLIDA tareas similares en una sola
-   - ELIMINA duplicados entre secciones
-   - SOLO tareas específicas y accionables (NO "revisar", "mejorar", "continuar")
-   - fecha_compromiso: usa fecha mencionada o "${fechaDefault}"
-   - IDs secuenciales: tarea_1, tarea_2...
-   - Máximo 15 tareas, prioriza las más importantes
-3. tareas_anteriores: solo si se mencionaron explícitamente tareas de reuniones previas
-
-Responde SOLO JSON válido.`;
+RESPONDE SOLO JSON VÁLIDO.`;
 
           try {
             const raw = await callLLM(prompt, 'llama-3.3-70b-versatile');
@@ -364,7 +464,6 @@ Responde SOLO JSON válido.`;
           }
         }
 
-        // Si no hay secciones o falló, intentar desde transcripción cruda
         if (!actaJson) {
           console.log(`[${meetingId}] Fallback: generando acta desde transcripción...`);
           actaJson = await generateActaFromRawTranscript(meetingId, meta, fechaDefault);
@@ -379,7 +478,6 @@ Responde SOLO JSON válido.`;
           };
         }
 
-        // Forzar identificación correcta
         actaJson.identificacion = { ...meta };
         resolve(actaJson);
       }
@@ -387,7 +485,7 @@ Responde SOLO JSON válido.`;
   });
 };
 
-// Fallback: acta desde transcripción cruda (para reuniones cortas sin secciones)
+// Fallback: acta desde transcripción cruda
 const generateActaFromRawTranscript = async (meetingId, meta, fechaDefault) => {
   return new Promise((resolve) => {
     db.all(
@@ -397,62 +495,67 @@ const generateActaFromRawTranscript = async (meetingId, meta, fechaDefault) => {
       async (err, rows) => {
         if (err || rows.length === 0) return resolve(null);
 
+        const { notes, audioTranscriptions } = await getMeetingSupplements(meetingId);
+
         const fullTranscript = rows.map(t => `[${t.speaker}]: ${t.text}`).join('\n');
         const wordCount = fullTranscript.split(/\s+/).length;
 
-        let prompt;
+        let transcriptInput = fullTranscript;
+
         if (wordCount > WORDS_PER_CHUNK) {
-          // Map-reduce para transcripciones largas sin secciones previas
           const words = fullTranscript.split(/\s+/);
           const sectionTexts = [];
           for (let i = 0; i < words.length; i += WORDS_PER_CHUNK) {
             sectionTexts.push(words.slice(i, i + WORDS_PER_CHUNK).join(' '));
           }
-
           const extracts = [];
           for (let i = 0; i < sectionTexts.length; i++) {
             const raw = await callLLM(
-              `Extrae de esta sección de reunión en JSON: {"temas": [], "tareas": [{"tarea":"","quien":"","cuando":""}], "resumen": ""}
+              `Analiza esta sección de reunión y extrae en JSON:
+{"temas": ["tema"], "decisiones": ["decisión"], "tareas": [{"tarea":"acción concreta","quien":"nombre","cuando":"fecha"}], "resumen": "2-3 frases"}
 
-Sección:
-${sectionTexts[i]}
+CRÍTICO: solo tareas EXPLÍCITAS con acción concreta. NO genéricas.
+
+Texto: ${sectionTexts[i]}
 
 SOLO JSON válido.`,
               'llama-3.1-8b-instant'
             ).catch(() => null);
             if (raw) { const p = parseJSON(raw); if (p) extracts.push(p); }
-            if (i < sectionTexts.length - 1) await sleep(1500);
+            if (i < sectionTexts.length - 1) await sleep(1200);
           }
-
-          const allTareas = extracts.flatMap(e => e.tareas || []);
-          const resumenes = extracts.map((e,i) => `Parte ${i+1}: ${e.resumen||''}`).join('\n');
-
-          prompt = `Genera acta de reunión en JSON.
-IDENTIFICACIÓN (usa exactamente): cliente="${meta.cliente}", proyecto="${meta.proyecto}", responsable="${meta.responsable}", participantes=${JSON.stringify(meta.participantes)}, fecha="${meta.fecha}", hora_inicio="${meta.hora_inicio}", hora_fin="${meta.hora_fin}"
-
-RESÚMENES: ${resumenes}
-TAREAS IDENTIFICADAS: ${JSON.stringify(allTareas)}
-
-JSON: {"identificacion":{...},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_1","descripcion":"","responsable":"","fecha_compromiso":"${fechaDefault}"}],"resumen_reunion":"","observaciones_generales":""}
-
-REGLAS tareas: consolida duplicados, máximo 15, solo concretas y específicas.
-SOLO JSON válido.`;
-        } else {
-          prompt = `Genera acta de reunión en JSON.
-IDENTIFICACIÓN (usa exactamente): cliente="${meta.cliente}", proyecto="${meta.proyecto}", responsable="${meta.responsable}", participantes=${JSON.stringify(meta.participantes)}, fecha="${meta.fecha}", hora_inicio="${meta.hora_inicio}", hora_fin="${meta.hora_fin}"
-
-JSON: {"identificacion":{...},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_1","descripcion":"","responsable":"","fecha_compromiso":"${fechaDefault}"}],"resumen_reunion":"","observaciones_generales":""}
-
-REGLAS tareas:
-- SOLO tareas EXPLÍCITAS y CONCRETAS del texto
-- NO genéricas ("revisar", "mejorar"). Máximo 15, IDs secuenciales.
-- fecha_compromiso: fecha mencionada o "${fechaDefault}"
-
-Transcripción:
-${fullTranscript}
-
-SOLO JSON válido.`;
+          transcriptInput = extracts.map((e, i) =>
+            `Sección ${i+1}: ${e.resumen || ''} | Tareas: ${JSON.stringify(e.tareas || [])}`
+          ).join('\n');
         }
+
+        let fuentesAdicionales = '';
+        if (notes.length > 0) {
+          fuentesAdicionales += `\nNOTAS ADICIONALES:\n${notes.map(n => `• ${n.author ? `[${n.author}]: ` : ''}${n.content}`).join('\n')}`;
+        }
+        if (audioTranscriptions.length > 0) {
+          fuentesAdicionales += `\n\nAUDIOS ADICIONALES:\n${audioTranscriptions.map(a => `--- ${a.file_name} ---\n${a.transcription}`).join('\n\n')}`;
+        }
+
+        const prompt = `Eres un redactor experto en actas corporativas.
+
+DATOS: cliente="${meta.cliente}", proyecto="${meta.proyecto}", responsable="${meta.responsable}", participantes=${JSON.stringify(meta.participantes)}, fecha="${meta.fecha}", hora_inicio="${meta.hora_inicio}", hora_fin="${meta.hora_fin}"
+
+TRANSCRIPCIÓN PRINCIPAL:
+${transcriptInput}
+${fuentesAdicionales}
+
+Genera el acta en JSON:
+{
+  "identificacion": {"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},
+  "tareas_anteriores": [],
+  "tareas_nuevas": [{"id":"tarea_1","descripcion":"acción concreta y específica","responsable":"nombre","fecha_compromiso":"${fechaDefault}"}],
+  "resumen_reunion": "Narrativa ejecutiva de 4-6 frases que explique: qué se trató, qué se decidió, y cuáles son los próximos pasos. En prosa, NO listas.",
+  "observaciones_generales": ""
+}
+
+REGLAS tareas: solo explícitas y concretas, consolida duplicados, máximo 15, IDs secuenciales.
+RESPONDE SOLO JSON VÁLIDO.`;
 
         try {
           const raw = await callLLM(prompt, 'llama-3.3-70b-versatile');
@@ -466,7 +569,7 @@ SOLO JSON válido.`;
   });
 };
 
-// ─── Función principal de post-proceso al terminar reunión ─────────────────────
+// ─── Finalizar reunión ────────────────────────────────────────────────────────
 const finalizeMeeting = async (meetingId) => {
   db.get(
     `SELECT cliente, proyecto, responsable, participantes, started_at, ended_at FROM meetings WHERE id = ?`,
@@ -477,9 +580,9 @@ const finalizeMeeting = async (meetingId) => {
       let participantes = [];
       try { participantes = JSON.parse(meeting.participantes || '[]'); } catch(_) {}
 
-      // Esperar a que terminen los chunks en vuelo (máx 3 minutos)
+      // Esperar chunks en vuelo (máx 5 min para reuniones largas)
       let waited = 0;
-      const MAX_WAIT = 3 * 60 * 1000; // FIX: era 30s, ahora 3 min para tolerar rate-limit de Groq
+      const MAX_WAIT = 5 * 60 * 1000;
       while (waited < MAX_WAIT) {
         const pending = await new Promise(resolve =>
           db.get('SELECT COUNT(*) as cnt FROM chunks WHERE meeting_id = ? AND processed = 0',
@@ -489,7 +592,7 @@ const finalizeMeeting = async (meetingId) => {
         waited += 3000;
       }
 
-      // Generar sección final con los chunks restantes no cubiertos por secciones previas
+      // Generar sección final con chunks no cubiertos
       const lastSectionRow = await new Promise(resolve =>
         db.get('SELECT MAX(to_chunk) as lastCovered FROM section_summaries WHERE meeting_id = ?',
           [meetingId], (_, r) => resolve(r)));
@@ -501,7 +604,6 @@ const finalizeMeeting = async (meetingId) => {
       const lastChunk = lastChunkRow?.lastChunk;
 
       if (lastChunk !== null && lastChunk !== undefined && lastChunk > lastCovered) {
-        // Hay chunks sin cubrir → generar sección final
         const sectionsCount = await new Promise(resolve =>
           db.get('SELECT COUNT(*) as cnt FROM section_summaries WHERE meeting_id = ?',
             [meetingId], (_, r) => resolve(r?.cnt || 0)));
@@ -510,9 +612,8 @@ const finalizeMeeting = async (meetingId) => {
         await generateSectionSummary(meetingId, sectionsCount + 1, lastCovered + 1, lastChunk);
       }
 
-      // Construir meta
       const startedDate = meeting.started_at ? new Date(meeting.started_at) : null;
-      const endedDate = meeting.ended_at ? new Date(meeting.ended_at) : null;
+      const endedDate   = meeting.ended_at   ? new Date(meeting.ended_at)   : null;
       const meta = {
         cliente: meeting.cliente || '',
         proyecto: meeting.proyecto || '',
@@ -528,16 +629,13 @@ const finalizeMeeting = async (meetingId) => {
       };
       const fechaDefault = addBusinessDays(meta.fecha || new Date().toISOString().split('T')[0], 3);
 
-      // Generar acta final
       console.log(`[${meetingId}] Generando acta final...`);
       const actaJson = await generateActaFromSections(meetingId, meta, fechaDefault);
       actaJson.identificacion = { ...meta };
 
-      // Guardar acta
       db.run('INSERT OR REPLACE INTO actas (meeting_id, acta_json) VALUES (?, ?)',
         [meetingId, JSON.stringify(actaJson)]);
 
-      // Guardar tareas
       db.run('DELETE FROM tareas WHERE meeting_id = ?', [meetingId], () => {
         const seen = new Set();
         let counter = 1;
@@ -562,23 +660,19 @@ const finalizeMeeting = async (meetingId) => {
   );
 };
 
-// ─── Conversión de audio: webm → mp3 usando ffmpeg ───────────────────────────
+// ─── Conversión audio: webm → mp3 ────────────────────────────────────────────
 const convertToMp3 = async (inputPath) => {
-  const outputPath = inputPath.replace(/\.webm$/, '.mp3');
+  const outputPath = inputPath.replace(/\.(webm|wav|m4a|ogg|mp4)$/, '.mp3');
   try {
     await execFileAsync('ffmpeg', [
-      '-y',                  // sobreescribir si existe
-      '-i', inputPath,       // archivo de entrada
-      '-vn',                 // sin video
-      '-ar', '16000',        // 16kHz — óptimo para Whisper
-      '-ac', '1',            // mono
-      '-b:a', '64k',         // bitrate bajo para reducir tamaño
+      '-y', '-i', inputPath, '-vn',
+      '-ar', '16000', '-ac', '1', '-b:a', '64k',
       outputPath
     ]);
     return outputPath;
   } catch (e) {
     console.error('ffmpeg error:', e.message);
-    return null; // Si ffmpeg falla, se usará el webm original
+    return null;
   }
 };
 
@@ -592,37 +686,24 @@ const processChunkWithWhisper = async (filePath, meetingId, chunkNumber, partici
   let fileToSend = filePath;
   let mp3Path = null;
 
-  // FIX: Convertir webm a mp3 antes de enviar a Whisper
-  // Whisper de Groq rechaza webms con "audio file is too short" aunque tengan contenido
   try {
     mp3Path = await convertToMp3(filePath);
     if (mp3Path && fs.existsSync(mp3Path)) {
       const mp3Size = fs.statSync(mp3Path).size;
-      const webmSize = fs.statSync(filePath).size;
-      console.log(`[chunk ${chunkNumber}] webm: ${(webmSize/1024).toFixed(0)}KB → mp3: ${(mp3Size/1024).toFixed(0)}KB`);
-      if (mp3Size > 1000) {
-        fileToSend = mp3Path; // Usar mp3 solo si la conversión produjo algo
-      } else {
-        console.warn(`[chunk ${chunkNumber}] mp3 muy pequeño (${mp3Size}B), usando webm original`);
-      }
+      if (mp3Size > 1000) fileToSend = mp3Path;
     }
-  } catch (convErr) {
-    console.warn(`[chunk ${chunkNumber}] No se pudo convertir a mp3, usando webm:`, convErr.message);
-  }
+  } catch (_) {}
 
   try {
     const fileSizeKB = fs.statSync(fileToSend).size / 1024;
     if (fileSizeKB < 1) {
-      console.warn(`[chunk ${chunkNumber}] Archivo demasiado pequeño (${fileSizeKB.toFixed(1)}KB), descartando`);
       db.run('UPDATE chunks SET processed = 1 WHERE meeting_id = ? AND chunk_number = ?', [meetingId, chunkNumber]);
       return null;
     }
 
     const whisperPrompt = participantes.length > 0
-      ? `Reunión de trabajo. Participantes: ${participantes.join(', ')}.`
+      ? `Reunión de trabajo en español. Participantes: ${participantes.join(', ')}.`
       : 'Reunión de trabajo en español.';
-
-    console.log(`[chunk ${chunkNumber}] Enviando a Whisper: ${path.basename(fileToSend)} (${fileSizeKB.toFixed(0)}KB)`);
 
     const transcription = await groq.audio.transcriptions.create({
       file: fs.createReadStream(fileToSend),
@@ -646,18 +727,13 @@ const processChunkWithWhisper = async (filePath, meetingId, chunkNumber, partici
           );
         }
       }
-      console.log(`[chunk ${chunkNumber}] ✅ ${segments.length} segmentos transcritos`);
     } else if (transcription.text?.trim()) {
       db.run(
         'INSERT INTO transcriptions (meeting_id, chunk_number, speaker, text, timestamp) VALUES (?, ?, ?, ?, ?)',
         [meetingId, chunkNumber, 'Speaker1', transcription.text.trim(), new Date().toISOString()]
       );
-      console.log(`[chunk ${chunkNumber}] ✅ Texto transcrito (sin segmentos)`);
-    } else {
-      console.warn(`[chunk ${chunkNumber}] ⚠️ Whisper respondió OK pero sin texto (silencio o audio inaudible)`);
     }
 
-    // Limpiar mp3 temporal
     if (mp3Path && fs.existsSync(mp3Path)) fs.unlinkSync(mp3Path);
 
     db.run('UPDATE chunks SET processed = 1 WHERE meeting_id = ? AND chunk_number = ?',
@@ -669,12 +745,9 @@ const processChunkWithWhisper = async (filePath, meetingId, chunkNumber, partici
   } catch (error) {
     if (mp3Path && fs.existsSync(mp3Path)) try { fs.unlinkSync(mp3Path); } catch(_) {}
     const code = error.status === 429 ? 2 : -1;
-    if (error.status === 429) console.warn(`Rate limit Whisper - chunk ${chunkNumber}, reintentando en 60s...`);
-    else console.error(`Error Whisper chunk ${chunkNumber}:`, error.message);
     db.run('UPDATE chunks SET processed = ? WHERE meeting_id = ? AND chunk_number = ?',
       [code, meetingId, chunkNumber]);
 
-    // Auto-reintento si fue rate limit (esperar 60s y volver a intentar)
     if (error.status === 429) {
       setTimeout(() => {
         db.run('UPDATE chunks SET processed = 0 WHERE meeting_id = ? AND chunk_number = ? AND processed = 2',
@@ -683,17 +756,170 @@ const processChunkWithWhisper = async (filePath, meetingId, chunkNumber, partici
           });
       }, 60000);
     }
-
     return null;
   }
 };
 
-// ─── Rutas ────────────────────────────────────────────────────────────────────
+// ─── Transcripción de adjunto de audio ────────────────────────────────────────
+const processAudioAttachment = async (attachmentId, filePath, meetingId, participantes = []) => {
+  if (!GROQ_API_KEY) {
+    db.run('UPDATE meeting_attachments SET transcription_status = ? WHERE id = ?', ['error', attachmentId]);
+    return;
+  }
 
+  db.run('UPDATE meeting_attachments SET transcription_status = ? WHERE id = ?', ['processing', attachmentId]);
+
+  let fileToSend = filePath;
+  let mp3Path = null;
+
+  try {
+    mp3Path = await convertToMp3(filePath);
+    if (mp3Path && fs.existsSync(mp3Path)) {
+      const mp3Size = fs.statSync(mp3Path).size;
+      if (mp3Size > 1000) fileToSend = mp3Path;
+    }
+  } catch (_) {}
+
+  try {
+    const fileSizeKB = fs.statSync(fileToSend).size / 1024;
+    if (fileSizeKB < 1) {
+      db.run('UPDATE meeting_attachments SET transcription_status = ?, transcription = ? WHERE id = ?',
+        ['done', '(archivo de audio vacío)', attachmentId]);
+      return;
+    }
+
+    const whisperPrompt = participantes.length > 0
+      ? `Audio de participante en reunión de trabajo en español. Participantes: ${participantes.join(', ')}.`
+      : 'Audio de participante en reunión de trabajo en español.';
+
+    console.log(`[adjunto ${attachmentId}] Transcribiendo con Whisper...`);
+
+    const transcription = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(fileToSend),
+      model: 'whisper-large-v3-turbo',
+      response_format: 'verbose_json',
+      language: 'es',
+      prompt: whisperPrompt
+    });
+
+    let transcriptText = '';
+    const segments = Array.isArray(transcription.segments) ? transcription.segments : [];
+    if (segments.length > 0) {
+      transcriptText = segments
+        .filter(s => (s.text || '').trim())
+        .map(s => s.text.trim())
+        .join(' ');
+    } else if (transcription.text?.trim()) {
+      transcriptText = transcription.text.trim();
+    }
+
+    if (mp3Path && fs.existsSync(mp3Path)) fs.unlinkSync(mp3Path);
+
+    db.run('UPDATE meeting_attachments SET transcription_status = ?, transcription = ? WHERE id = ?',
+      ['done', transcriptText, attachmentId]);
+
+    console.log(`[adjunto ${attachmentId}] ✅ Transcripción lista (${transcriptText.split(/\s+/).length} palabras)`);
+  } catch (error) {
+    if (mp3Path && fs.existsSync(mp3Path)) try { fs.unlinkSync(mp3Path); } catch(_) {}
+    console.error(`[adjunto ${attachmentId}] Error Whisper:`, error.message);
+    db.run('UPDATE meeting_attachments SET transcription_status = ? WHERE id = ?', ['error', attachmentId]);
+  }
+};
+
+// ─── Reunión desde texto manual ───────────────────────────────────────────────
+const generateActaFromText = async (texto, modo, meta, fechaDefault) => {
+  const contextoPorModo = {
+    notas: `El texto son NOTAS LIBRES tomadas durante o después de una reunión. Puede estar desordenado, con abreviaciones o bullets. Interpreta e integra todo el contenido.`,
+    transcripcion: `El texto es una TRANSCRIPCIÓN de reunión con diálogos entre participantes. Identifica los speakers y extrae compromisos de cada uno.`,
+    email: `El texto es un EMAIL o MENSAJE DE RESUMEN post-reunión. Extrae compromisos, acuerdos y pendientes. El autor del email es generalmente el moderador.`,
+  };
+
+  const contexto = contextoPorModo[modo] || contextoPorModo.notas;
+  const wordCount = texto.split(/\s+/).length;
+
+  if (wordCount > 3000) {
+    const words = texto.split(/\s+/);
+    const sections = [];
+    for (let i = 0; i < words.length; i += 2500) sections.push(words.slice(i, i + 2500).join(' '));
+    const extracts = [];
+    for (let i = 0; i < sections.length; i++) {
+      const raw = await callLLM(
+        `Analiza esta sección de reunión y extrae en JSON:
+{"temas": ["tema"], "decisiones": ["decisión"], "tareas": [{"tarea":"acción concreta","quien":"nombre","cuando":"fecha"}], "resumen": "2-3 frases"}
+CRÍTICO: solo tareas EXPLÍCITAS con acción concreta.
+Texto: ${sections[i]}
+SOLO JSON válido.`,
+        'llama-3.1-8b-instant'
+      ).catch(() => null);
+      if (raw) { const p = parseJSON(raw); if (p) extracts.push(p); }
+      if (i < sections.length - 1) await sleep(1200);
+    }
+    texto = extracts.map((e, i) =>
+      `Sección ${i+1}: ${e.resumen || ''} | Tareas: ${JSON.stringify(e.tareas || [])}`
+    ).join('\n');
+  }
+
+  const prompt = `Eres un redactor experto en actas de reunión corporativas.
+
+TIPO DE ENTRADA: ${contexto}
+
+DATOS DE IDENTIFICACIÓN (usa EXACTAMENTE estos valores):
+cliente="${meta.cliente}", proyecto="${meta.proyecto}", responsable="${meta.responsable}",
+participantes=${JSON.stringify(meta.participantes)}, fecha="${meta.fecha}",
+hora_inicio="${meta.hora_inicio}", hora_fin="${meta.hora_fin}"
+
+CONTENIDO DE LA REUNIÓN:
+${texto}
+
+Genera el acta en JSON exacto:
+{
+  "identificacion": {"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},
+  "tareas_anteriores": [],
+  "tareas_nuevas": [{"id":"tarea_1","descripcion":"descripción clara y específica de la acción","responsable":"nombre","fecha_compromiso":"${fechaDefault}"}],
+  "resumen_reunion": "",
+  "observaciones_generales": ""
+}
+
+REGLAS para "resumen_reunion":
+- 4-6 frases en prosa ejecutiva y fluida (NO listas)
+- Cubre: objetivo → temas tratados → decisiones → próximos pasos
+- Útil para alguien que no asistió
+
+REGLAS para "tareas_nuevas":
+- SOLO tareas EXPLÍCITAS: "Juan enviará el informe", "María prepara el documento"
+- NUNCA tareas vagas: "revisar", "mejorar", "continuar", "hacer seguimiento"
+- Un responsable claro por tarea (vacío si no se mencionó)
+- fecha_compromiso: fecha específica mencionada, o "${fechaDefault}"
+- Máximo 15 tareas, consolida duplicados, IDs secuenciales
+
+RESPONDE SOLO JSON VÁLIDO.`;
+
+  const raw = await callLLM(prompt, 'llama-3.3-70b-versatile');
+  return parseJSON(raw);
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── RUTAS ───────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Rutas públicas (sin auth) ─────────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString(), hasGroqKey: Boolean(GROQ_API_KEY) });
 });
 
+app.post('/login', (req, res) => {
+  const { password } = req.body;
+  if (!password || password !== APP_PASSWORD) {
+    return res.status(401).json({ error: 'Contraseña incorrecta' });
+  }
+  const token = jwt.sign({ role: 'user', ts: Date.now() }, JWT_SECRET, { expiresIn: '30d' });
+  res.json({ token, expiresIn: '30d' });
+});
+
+// ── Auth middleware para todas las rutas siguientes ───────────────────────────
+app.use(authMiddleware);
+
+// ── Rutas de reuniones ────────────────────────────────────────────────────────
 app.post('/startMeeting', (req, res) => {
   const meetingId = uuidv4();
   const { user_id = 'default', cliente = '', proyecto = '', responsable = '' } = req.body;
@@ -717,7 +943,6 @@ app.post('/endMeeting', (req, res) => {
     err => {
       if (err) return res.status(500).json({ error: err.message });
       res.json({ meetingId, status: 'ended', actaStatus: 'processing' });
-      console.log(`[${meetingId}] Reunión finalizada. Iniciando post-proceso...`);
       finalizeMeeting(meetingId).catch(e => console.error('Error finalizeMeeting:', e.message));
     }
   );
@@ -728,12 +953,11 @@ app.post('/chunk', upload.single('audio'), async (req, res) => {
   if (!meetingId || chunkNumber === undefined || !req.file)
     return res.status(400).json({ error: 'Missing fields' });
 
-  const audioDir = path.join(storagePath, meetingId);
-  const filePath = path.join(audioDir, `chunk_${chunkNumber}.webm`);
+  const audioDir  = path.join(storagePath, meetingId);
+  const filePath  = path.join(audioDir, `chunk_${chunkNumber}.webm`);
   fs.mkdirSync(audioDir, { recursive: true });
   fs.writeFileSync(filePath, req.file.buffer);
 
-  // Obtener participantes para Whisper prompt
   db.get('SELECT participantes FROM meetings WHERE id = ?', [meetingId], (_, meeting) => {
     let participantes = [];
     try { participantes = JSON.parse(meeting?.participantes || '[]'); } catch(_) {}
@@ -750,7 +974,6 @@ app.post('/chunk', upload.single('audio'), async (req, res) => {
   });
 });
 
-// Endpoint de progreso para el frontend
 app.get('/meetings/:id/progress', (req, res) => {
   const { id } = req.params;
   Promise.all([
@@ -764,125 +987,7 @@ app.get('/meetings/:id/progress', (req, res) => {
   });
 });
 
-// ── Reunión desde texto manual — procesamiento directo sin chunks ──────────────
-const generateActaFromText = async (texto, modo, meta, fechaDefault) => {
-  // Prompts específicos por tipo de entrada
-  const contextoPorModo = {
-    notas: `El texto es un conjunto de NOTAS LIBRES tomadas durante o después de una reunión. 
-Puede estar desordenado, con abreviaciones, bullets o párrafos mezclados.
-Tu trabajo es interpretar el contenido y estructurarlo en un acta profesional.`,
-    transcripcion: `El texto es una TRANSCRIPCIÓN de reunión, con diálogos entre participantes.
-Puede tener formato [Nombre]: texto o simplemente diálogo libre.
-Identifica los speakers y extrae los compromisos de cada uno.`,
-    email: `El texto es un EMAIL o MENSAJE DE RESUMEN enviado después de la reunión.
-Extrae los compromisos, acuerdos y pendientes mencionados.
-El autor del email generalmente es el moderador o responsable.`,
-  };
-
-  const contexto = contextoPorModo[modo] || contextoPorModo.notas;
-  const wordCount = texto.split(/\s+/).length;
-
-  // Para textos muy largos, hacer map-reduce primero
-  if (wordCount > 3000) {
-    console.log(`Texto largo (${wordCount} palabras) - usando map-reduce...`);
-    const words = texto.split(/\s+/);
-    const sections = [];
-    for (let i = 0; i < words.length; i += 2500) {
-      sections.push(words.slice(i, i + 2500).join(' '));
-    }
-    const extracts = [];
-    for (let i = 0; i < sections.length; i++) {
-      const raw = await callLLM(
-        `Analiza esta sección de reunión y extrae en JSON:
-{"temas": ["tema"], "decisiones": ["decisión"], "tareas": [{"tarea":"acción concreta","quien":"nombre","cuando":"fecha"}], "resumen": "2-3 frases"}
-
-CRÍTICO: solo tareas EXPLÍCITAS con acción concreta. NO genéricas.
-
-Texto: ${sections[i]}
-
-SOLO JSON válido.`,
-        'llama-3.1-8b-instant'
-      ).catch(() => null);
-      if (raw) { const p = parseJSON(raw); if (p) extracts.push(p); }
-      if (i < sections.length - 1) await sleep(1200);
-    }
-    // Combinar extracts
-    texto = extracts.map((e, i) =>
-      `Sección ${i+1}: ${e.resumen || ''} | Tareas: ${JSON.stringify(e.tareas || [])}`
-    ).join('\n');
-  }
-
-  const prompt = `Eres un asistente experto en redacción de actas de reunión.
-
-TIPO DE ENTRADA: ${contexto}
-
-DATOS DE IDENTIFICACIÓN (usa EXACTAMENTE estos valores, no los cambies):
-- cliente: "${meta.cliente}"
-- proyecto: "${meta.proyecto}"  
-- responsable: "${meta.responsable}"
-- participantes: ${JSON.stringify(meta.participantes)}
-- fecha: "${meta.fecha}"
-- hora_inicio: "${meta.hora_inicio}"
-- hora_fin: "${meta.hora_fin}"
-
-TEXTO DE LA REUNIÓN:
-${texto}
-
-Genera el acta en este JSON exacto:
-{
-  "identificacion": {
-    "cliente": "",
-    "proyecto": "",
-    "fecha": "",
-    "hora_inicio": "",
-    "hora_fin": "",
-    "responsable": "",
-    "participantes": []
-  },
-  "tareas_anteriores": [],
-  "tareas_nuevas": [
-    {
-      "id": "tarea_1",
-      "descripcion": "Descripción clara y específica de la acción a realizar",
-      "responsable": "Nombre de quien debe ejecutarla",
-      "fecha_compromiso": "${fechaDefault}"
-    }
-  ],
-  "resumen_reunion": "",
-  "observaciones_generales": ""
-}
-
-REGLAS CRÍTICAS — léelas con atención:
-
-Para "resumen_reunion":
-- Escribe 3-5 frases fluidas y narrativas que cuenten qué pasó en la reunión
-- Incluye: objetivo de la reunión, temas principales tratados, decisiones tomadas
-- NO hagas listas, escribe en prosa como un párrafo ejecutivo
-- Debe ser útil para alguien que no asistió
-
-Para "tareas_nuevas":
-- SOLO tareas EXPLÍCITAS: "Juan va a enviar el informe", "María prepara el documento"  
-- NUNCA tareas vagas: "revisar", "mejorar", "continuar", "hacer seguimiento", "coordinar" (sin objeto concreto)
-- Cada tarea debe tener UN responsable claro (si no se menciona, deja vacío)
-- fecha_compromiso: usa la fecha específica mencionada, o "${fechaDefault}" si no se menciona
-- IDs secuenciales: tarea_1, tarea_2, tarea_3...
-- Máximo 15 tareas. Si hay más, prioriza las más importantes y urgentes
-- Consolida tareas duplicadas o muy similares en una sola
-
-Para "tareas_anteriores":
-- Solo si el texto menciona EXPLÍCITAMENTE pendientes de reuniones anteriores
-- Si no hay mención, deja el array vacío []
-
-Para "observaciones_generales":
-- Notas adicionales relevantes que no encajen en el resumen
-- Puede estar vacío si no hay nada adicional
-
-RESPONDE SOLO CON EL JSON VÁLIDO, sin texto antes ni después.`;
-
-  const raw = await callLLM(prompt, 'llama-3.3-70b-versatile');
-  return parseJSON(raw);
-};
-
+// ── Reunión desde texto manual ────────────────────────────────────────────────
 app.post('/meetings/from-text', async (req, res) => {
   const {
     user_id = 'default', cliente = '', proyecto = '', responsable = '',
@@ -912,16 +1017,12 @@ app.post('/meetings/from-text', async (req, res) => {
     async err => {
       if (err) return res.status(500).json({ error: err.message });
 
-      // Guardar texto como transcripción para verlo en la UI
       insertTextAsTranscription(meetingId, texto.trim(), 0);
-
-      // Responder inmediatamente
       res.json({ meetingId, status: 'ended', message: 'Procesando...' });
 
-      // Procesar en segundo plano
       try {
         const startedDate = new Date(startedAt);
-        const endedDate = new Date(endedAt);
+        const endedDate   = new Date(endedAt);
         const meta = {
           cliente, proyecto, responsable,
           participantes: participantesArr,
@@ -930,27 +1031,21 @@ app.post('/meetings/from-text', async (req, res) => {
           hora_fin: hora_fin || `${String(endedDate.getHours()).padStart(2,'0')}:${String(endedDate.getMinutes()).padStart(2,'0')}`,
         };
         const fechaDefault = addBusinessDays(meta.fecha, 3);
-
-        console.log(`[${meetingId}] Generando acta desde texto (modo: ${modo}, ${texto.split(/\s+/).length} palabras)...`);
         let actaJson = await generateActaFromText(texto.trim(), modo, meta, fechaDefault);
 
         if (!actaJson) {
           actaJson = {
             identificacion: { ...meta },
             tareas_anteriores: [], tareas_nuevas: [],
-            resumen_reunion: 'No se pudo generar el acta automáticamente. Revisa el texto ingresado.',
+            resumen_reunion: 'No se pudo generar el acta automáticamente.',
             observaciones_generales: ''
           };
         }
-
-        // Forzar identificación correcta
         actaJson.identificacion = { ...meta };
 
-        // Guardar acta
         db.run('INSERT OR REPLACE INTO actas (meeting_id, acta_json) VALUES (?, ?)',
           [meetingId, JSON.stringify(actaJson)]);
 
-        // Guardar tareas
         const seen = new Set();
         let counter = 1;
         (actaJson.tareas_nuevas || [])
@@ -964,15 +1059,13 @@ app.post('/meetings/from-text', async (req, res) => {
               'INSERT INTO tareas (meeting_id, tarea_id, tipo, descripcion, responsable, estado, fecha_compromiso) VALUES (?, ?, ?, ?, ?, ?, ?)',
               [meetingId, `tarea_${counter++}`, 'nueva',
                (t.descripcion||'').trim(), (t.responsable||'').trim(),
-               'pendiente', t.fecha_compromiso || fechaDefault]
+               'pendiente', t.fecha_compromiso || addBusinessDays(meta.fecha, 3)]
             );
           });
 
-        // Marcar como terminado
         db.run('UPDATE meetings SET status = ? WHERE id = ?', ['ended', meetingId]);
-        console.log(`[${meetingId}] ✅ Acta lista. ${actaJson.tareas_nuevas?.length||0} tareas.`);
       } catch (e) {
-        console.error(`[${meetingId}] Error procesando texto:`, e.message);
+        console.error(`[${meetingId}] Error:`, e.message);
         db.run('UPDATE meetings SET status = ? WHERE id = ?', ['ended', meetingId]);
       }
     }
@@ -1010,7 +1103,7 @@ function insertTextAsTranscription(meetingId, texto, startChunk) {
   }
 }
 
-// ── Rutas de consulta ──────────────────────────────────────────────────────────
+// ── Rutas de consulta ─────────────────────────────────────────────────────────
 app.get('/meetings', (req, res) => {
   const userId = req.query.user_id || 'default';
   db.all('SELECT * FROM meetings WHERE user_id = ? ORDER BY started_at DESC', [userId], (err, rows) => {
@@ -1037,38 +1130,15 @@ app.get('/meetings/:id/transcription', (req, res) => {
 
 app.get('/meetings/:id/acta', (req, res) => {
   const meetingId = req.params.id;
-
-  db.get(
-    'SELECT status FROM meetings WHERE id = ?',
-    [meetingId],
-    (err, meeting) => {
+  db.get('SELECT status FROM meetings WHERE id = ?', [meetingId], (err, meeting) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!meeting) return res.status(404).json({ error: 'Meeting not found' });
+    db.get('SELECT acta_json FROM actas WHERE meeting_id = ?', [meetingId], (err, row) => {
       if (err) return res.status(500).json({ error: err.message });
-      if (!meeting) return res.status(404).json({ error: 'Meeting not found' });
-
-      db.get(
-        'SELECT acta_json FROM actas WHERE meeting_id = ?',
-        [meetingId],
-        (err, row) => {
-          if (err) return res.status(500).json({ error: err.message });
-
-          // 👉 Acta aún en proceso (caso NORMAL)
-          if (!row) {
-            return res.status(202).json({
-              status: 'processing',
-              meetingStatus: meeting.status,
-              message: 'El acta aún se está generando'
-            });
-          }
-
-          // 👉 Acta lista
-          res.json({
-            status: 'ready',
-            acta: JSON.parse(row.acta_json)
-          });
-        }
-      );
-    }
-  );
+      if (!row) return res.status(202).json({ status: 'processing', meetingStatus: meeting.status, message: 'El acta aún se está generando' });
+      res.json({ status: 'ready', acta: JSON.parse(row.acta_json) });
+    });
+  });
 });
 
 app.get('/meetings/:id/tareas', (req, res) => {
@@ -1109,6 +1179,108 @@ app.post('/meetings/:id/reprocess-acta', async (req, res) => {
       });
     });
   });
+});
+
+// ── NUEVAS RUTAS: Notas ───────────────────────────────────────────────────────
+app.get('/meetings/:id/notes', (req, res) => {
+  db.all('SELECT * FROM meeting_notes WHERE meeting_id = ? ORDER BY created_at',
+    [req.params.id], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    });
+});
+
+app.post('/meetings/:id/notes', (req, res) => {
+  const { content = '', author = '' } = req.body;
+  if (!content.trim()) return res.status(400).json({ error: 'Contenido vacío' });
+  db.get('SELECT id FROM meetings WHERE id = ?', [req.params.id], (err, row) => {
+    if (err || !row) return res.status(404).json({ error: 'Reunión no encontrada' });
+    db.run('INSERT INTO meeting_notes (meeting_id, content, author) VALUES (?, ?, ?)',
+      [req.params.id, content.trim(), author.trim()],
+      function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ id: this.lastID, meeting_id: req.params.id, content: content.trim(), author: author.trim() });
+      }
+    );
+  });
+});
+
+app.delete('/meetings/:id/notes/:noteId', (req, res) => {
+  db.run('DELETE FROM meeting_notes WHERE id = ? AND meeting_id = ?',
+    [req.params.noteId, req.params.id], err => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ ok: true });
+    });
+});
+
+// ── NUEVAS RUTAS: Adjuntos ────────────────────────────────────────────────────
+app.get('/meetings/:id/attachments', (req, res) => {
+  db.all('SELECT id, meeting_id, file_name, file_type, mime_type, transcription_status, uploaded_at FROM meeting_attachments WHERE meeting_id = ? ORDER BY uploaded_at',
+    [req.params.id], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    });
+});
+
+app.post('/meetings/:id/attachments', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No se recibió archivo' });
+
+  const meetingId = req.params.id;
+  db.get('SELECT id, participantes FROM meetings WHERE id = ?', [meetingId], (err, meeting) => {
+    if (err || !meeting) return res.status(404).json({ error: 'Reunión no encontrada' });
+
+    const mimeType   = req.file.mimetype || '';
+    const isAudio    = mimeType.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|webm|aac|flac)$/i.test(req.file.originalname);
+    const fileType   = isAudio ? 'audio' : 'document';
+
+    const dir      = path.join(attachmentPath, meetingId);
+    fs.mkdirSync(dir, { recursive: true });
+    const safeFileName = `${Date.now()}_${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const filePath = path.join(dir, safeFileName);
+    fs.writeFileSync(filePath, req.file.buffer);
+
+    const transcriptionStatus = isAudio ? 'pending' : 'n/a';
+
+    db.run(
+      'INSERT INTO meeting_attachments (meeting_id, file_name, file_path, file_type, mime_type, transcription_status) VALUES (?, ?, ?, ?, ?, ?)',
+      [meetingId, req.file.originalname, filePath, fileType, mimeType, transcriptionStatus],
+      function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        const attachId = this.lastID;
+        res.json({ id: attachId, file_name: req.file.originalname, file_type: fileType, transcription_status: transcriptionStatus });
+
+        if (isAudio) {
+          let participantes = [];
+          try { participantes = JSON.parse(meeting.participantes || '[]'); } catch(_) {}
+          processAudioAttachment(attachId, filePath, meetingId, participantes).catch(console.error);
+        }
+      }
+    );
+  });
+});
+
+app.delete('/meetings/:id/attachments/:attachId', (req, res) => {
+  db.get('SELECT file_path FROM meeting_attachments WHERE id = ? AND meeting_id = ?',
+    [req.params.attachId, req.params.id], (err, row) => {
+      if (err || !row) return res.status(404).json({ error: 'Adjunto no encontrado' });
+      db.run('DELETE FROM meeting_attachments WHERE id = ?', [req.params.attachId], err => {
+        if (err) return res.status(500).json({ error: err.message });
+        try { if (fs.existsSync(row.file_path)) fs.unlinkSync(row.file_path); } catch(_) {}
+        res.json({ ok: true });
+      });
+    });
+});
+
+// Descargar adjunto (documentos)
+app.get('/meetings/:id/attachments/:attachId/download', (req, res) => {
+  db.get('SELECT file_name, file_path, mime_type FROM meeting_attachments WHERE id = ? AND meeting_id = ?',
+    [req.params.attachId, req.params.id], (err, row) => {
+      if (err || !row) return res.status(404).json({ error: 'Adjunto no encontrado' });
+      if (!fs.existsSync(row.file_path)) return res.status(404).json({ error: 'Archivo no encontrado en disco' });
+      res.setHeader('Content-Disposition', `attachment; filename="${row.file_name}"`);
+      if (row.mime_type) res.setHeader('Content-Type', row.mime_type);
+      res.sendFile(path.resolve(row.file_path));
+    });
 });
 
 const PORT = process.env.PORT || 3000;
