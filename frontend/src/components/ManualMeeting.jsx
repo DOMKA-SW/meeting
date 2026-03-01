@@ -1,7 +1,8 @@
+import { apiFetch } from '../utils/api';
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-const API_URL = import.meta.env.VITE_API_BASE_URL;
+
 
 const EJEMPLOS = {
   notas: `Reunión de seguimiento proyecto App Móvil - 23 Feb 2026
@@ -138,7 +139,7 @@ export default function ManualMeeting() {
         ? form.participantes.split(/[,;]/).map(p => p.trim()).filter(Boolean)
         : [];
 
-      const res = await fetch(`${API_URL}/meetings/from-text`, {
+      const res = await apiFetch(`/meetings/from-text`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
