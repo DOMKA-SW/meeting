@@ -1,8 +1,8 @@
+import { apiFetch } from '../utils/api';
 import { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { apiFetch } from '../utils/api';
 
 function safeJsonParseArray(s) {
   try { const v = JSON.parse(s); return Array.isArray(v) ? v : []; } catch { return []; }
@@ -512,11 +512,11 @@ function MeetingDetail() {
   };
 
   const generarIdTarea = (tipo) => {
-    const prefix = tipo==='tareas_anteriores'?'A':'T';
+    const prefix = tipo==='tareas_anteriores'?'ant_':'tarea_';
     const existentes = [...(actaDraft?.tareas_nuevas||[]).map(t=>t.id||''), ...(actaDraft?.tareas_anteriores||[]).map(t=>t.id||''), ...tareasDraft.map(t=>t.tarea_id||'')];
     let n=existentes.length+1;
-    let c=`${prefix}-${String(n).padStart(3,'0')}`;
-    while(existentes.includes(c)){n++;c=`${prefix}-${String(n).padStart(3,'0')}`;}
+    let c=`${prefix}${String(n).padStart(3,'0')}`;
+    while(existentes.includes(c)){n++;c=`${prefix}${String(n).padStart(3,'0')}`;}
     return c;
   };
 
