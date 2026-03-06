@@ -191,6 +191,39 @@ const getSupplements = async mid=>{
   const[audios]=await db.execute(`SELECT file_name,transcription FROM meeting_attachments WHERE meeting_id=? AND transcription_status='done' AND transcription IS NOT NULL AND transcription!=''`,[mid]);
   return{notes,audioTranscriptions:audios};
 };
+
+// Extrae tareas explícitamente de notas y audios adjuntos
+const extractTareasFromSupplements = async(notes, audioTranscriptions) => {
+  if(!GROQ_API_KEY || (notes.length === 0 && audioTranscriptions.length === 0)) return [];
+  const textoParts = [];
+  if(notes.length > 0){
+    textoParts.push('=== NOTAS ===');
+    notes.forEach(n => textoParts.push(`• ${n.author ? `[${n.author}]: ` : ''}${n.content}`));
+  }
+  if(audioTranscriptions.length > 0){
+    textoParts.push('=== AUDIOS ADICIONALES ===');
+    audioTranscriptions.forEach(a => textoParts.push(`--- ${a.file_name} ---\n${a.transcription}`));
+  }
+  const texto = textoParts.join('\n');
+  const prompt = `Extrae TODAS las tareas, compromisos y pendientes mencionados en este texto.
+REGLAS:
+- Solo tareas con acción concreta + objeto específico (✅ "Enviar contrato al cliente" ✅ "Corregir bug del login")
+- NO vagas (❌ "Revisar" ❌ "Hacer seguimiento" ❌ "Ver el tema")
+- Incluye quién es responsable si se menciona
+- Si no hay tareas claras, devuelve array vacío
+JSON: {"tareas":[{"descripcion":"acción concreta","responsable":"nombre o vacío","cuando":"fecha o vacío"}]}
+TEXTO:
+${texto}
+SOLO JSON.`;
+  try {
+    const raw = await callLLM(prompt, 'llama-3.3-70b-versatile');
+    const p   = parseJSON(raw);
+    return (p?.tareas || []).filter(t => t.descripcion && t.descripcion.trim().length > 8);
+  } catch(e) {
+    console.warn('extractTareasFromSupplements:', e.message);
+    return [];
+  }
+};
 const waitAudios = async(mid,maxMs=5*60*1000)=>{
   let w=0;while(w<maxMs){const[[{cnt}]]=await db.execute(`SELECT COUNT(*) as cnt FROM meeting_attachments WHERE meeting_id=? AND file_type='audio' AND transcription_status IN ('pending','processing')`,[mid]);if(!cnt)break;await sleep(5000);w+=5000;}
 };
@@ -274,6 +307,7 @@ TAREAS PRE-PROCESADAS: ${JSON.stringify(allTareasBruto,null,2)}
 ━━ REGLAS ━━
 "resumen_reunion": 4-6 frases prosa ejecutiva. Objetivo→temas→decisiones→próximos pasos.${hasSup?'\nIntegra info de notas y audios.':''}
 "tareas_nuevas": SOLO acción+objeto+identificable. ✅ "Juan enviará el contrato el viernes" ❌ "Revisar" ❌ "Hacer seguimiento"
+- Las tareas marcadas [NOTA] en PRE-PROCESADAS vienen de notas escritas — INCLÚYELAS si son concretas (quita el prefijo [NOTA] en la descripción final)
 - NO duplicar anteriores. Consolida duplicados. Máx 15. IDs tarea_001/002/003...
 "tareas_anteriores": ${tareasAnt.length?`incluye las ${tareasAnt.length} anteriores con su estado`:'[]'}
 
@@ -287,9 +321,15 @@ const genActa = async(mid,meta,fechaDef,tareasAnt=[])=>{
   const hasSup=notes.length>0||audioTranscriptions.length>0;
   let actaJson=null;
 
+  // Extraer tareas de notas y audios adjuntos de forma explícita
+  const tareasDeNotas = await extractTareasFromSupplements(notes, audioTranscriptions);
+  if(tareasDeNotas.length > 0) console.log(`[${mid}] ${tareasDeNotas.length} tareas extraídas de notas/adjuntos`);
+
   if(secs.length>0){
     const sectionInputs=secs.map((s,i)=>{const sum=parseJSON(s.summary_json)||{};return `--- SECCIÓN ${i+1} ---\nTemas: ${(sum.temas||[]).join(', ')}\nDecisiones: ${(sum.decisiones||[]).join('; ')}\nTareas: ${JSON.stringify(sum.tareas||[])}\nResumen: ${sum.resumen||''}`;}).join('\n\n');
-    const allTareas=secs.flatMap(s=>{const sum=parseJSON(s.summary_json)||{};return(sum.tareas||[]).map(t=>({descripcion:(t.tarea||t.descripcion||'').trim(),responsable:(t.quien||t.responsable||'').trim(),fecha_compromiso:(t.cuando||t.fecha_compromiso||'').trim()}));});
+    const tareasDeTranscripcion=secs.flatMap(s=>{const sum=parseJSON(s.summary_json)||{};return(sum.tareas||[]).map(t=>({descripcion:(t.tarea||t.descripcion||'').trim(),responsable:(t.quien||t.responsable||'').trim(),fecha_compromiso:(t.cuando||t.fecha_compromiso||'').trim()}));});
+    // Combinar tareas de transcripción + notas (las notas van al final con etiqueta)
+    const allTareas=[...tareasDeTranscripcion,...tareasDeNotas.map(t=>({...t,descripcion:`[NOTA] ${t.descripcion}`}))];
     try{const raw=await callLLM(buildActaPrompt(meta,sectionInputs,allTareas,tareasAnt,sb,hasSup,fechaDef),'llama-3.3-70b-versatile');actaJson=parseJSON(raw);}
     catch(e){console.error('genActa secciones:',e.message);}
   }
@@ -304,7 +344,8 @@ const genActa = async(mid,meta,fechaDef,tareasAnt=[])=>{
         tscr=ex.map((e,i)=>`Sección ${i+1}: ${e.resumen||''} | Tareas: ${JSON.stringify(e.tareas||[])}`).join('\n');
       }
       const antStr=tareasAnt.length?`\nTAREAS ANTERIORES:\n${tareasAnt.map(t=>`• [${t.estado}] ${t.descripcion}`).join('\n')}`:'';
-      try{const raw=await callLLM(`Genera acta. DATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}\nTRANSCRIPCIÓN:${tscr}${sb}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: tareas explícitas, NO duplicar anteriores, IDs tarea_001/002..., máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');actaJson=parseJSON(raw);}
+      const notasStr=tareasDeNotas.length>0?`\nTAREAS DETECTADAS EN NOTAS ADICIONALES (inclúyelas si son concretas):\n${tareasDeNotas.map(t=>`• ${t.descripcion}${t.responsable?' ('+t.responsable+')':''}`).join('\n')}`:'';
+      try{const raw=await callLLM(`Genera acta. DATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}${notasStr}\nTRANSCRIPCIÓN:${tscr}${sb}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: tareas explícitas, NO duplicar anteriores, IDs tarea_001/002..., máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');actaJson=parseJSON(raw);}
       catch(e){console.error('genActa raw:',e.message);}
     }
   }
@@ -556,13 +597,19 @@ app.post('/chunk',upload.single('audio'),async(req,res)=>{
 
 app.get('/meetings/:id/progress',async(req,res)=>{
   try{
-    const[[{total}]]=await db.execute('SELECT COUNT(*) as total FROM chunks WHERE meeting_id=?',[req.params.id]);
-    const[[{processed}]]=await db.execute('SELECT COUNT(*) as processed FROM chunks WHERE meeting_id=? AND processed=1',[req.params.id]);
-    const[[{sections}]]=await db.execute('SELECT COUNT(*) as sections FROM section_summaries WHERE meeting_id=?',[req.params.id]);
-    const[[{lines}]]=await db.execute('SELECT COUNT(*) as lines FROM transcriptions WHERE meeting_id=?',[req.params.id]);
-    const[[{status}]]=await db.execute('SELECT status FROM meetings WHERE id=?',[req.params.id]);
-    res.json({chunksTotal:total,chunksProcessed:processed,sectionsGenerated:sections,transcriptionLines:lines,status});
-  }catch(e){res.status(500).json({error:e.message});}
+    const safeCount = async(sql,params)=>{
+      const[rows]=await db.execute(sql,params);
+      return rows[0] ? Object.values(rows[0])[0] : 0;
+    };
+    const [meetingRows] = await db.execute('SELECT status FROM meetings WHERE id=?',[req.params.id]);
+    if(!meetingRows.length) return res.status(404).json({error:'Reunión no encontrada'});
+    const total     = await safeCount('SELECT COUNT(*) as cnt FROM chunks WHERE meeting_id=?',[req.params.id]);
+    const processed = await safeCount('SELECT COUNT(*) as cnt FROM chunks WHERE meeting_id=? AND processed=1',[req.params.id]);
+    const sections  = await safeCount('SELECT COUNT(*) as cnt FROM section_summaries WHERE meeting_id=?',[req.params.id]);
+    const lines     = await safeCount('SELECT COUNT(*) as cnt FROM transcriptions WHERE meeting_id=?',[req.params.id]);
+    const notes     = await safeCount('SELECT COUNT(*) as cnt FROM meeting_notes WHERE meeting_id=?',[req.params.id]);
+    res.json({chunksTotal:total,chunksProcessed:processed,sectionsGenerated:sections,transcriptionLines:lines,notesCount:notes,status:meetingRows[0].status});
+  }catch(e){console.error('progress error:',e.message);res.status(500).json({error:e.message});}
 });
 
 app.get('/meetings',async(req,res)=>{
