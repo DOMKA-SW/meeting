@@ -1696,3 +1696,4 @@ initDB()
     console.log(`🚀 Puerto ${PORT} | ENV=${process.env.NODE_ENV || 'development'} | CORS=${ALLOWED_ORIGINS.join(',')}`)
   ))
   .catch(e => { console.error('❌ DB init failed:', e.message); process.exit(1); });
+
