@@ -50,7 +50,7 @@ const helmetMiddleware = helmet({
 // ─── FASE 1: CORS seguro — lista blanca de orígenes ──────────────────────────
 const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL,
-  process.env.FRONTEND_URL_2,                      // por si tienes preview deploys
+  process.env.FRONTEND_URL_2,
   ...(IS_PROD ? [] : [
     'http://localhost:5173',
     'http://localhost:3000',
@@ -58,22 +58,34 @@ const ALLOWED_ORIGINS = [
   ])
 ].filter(Boolean);
 
+// ⚠️  Advertencia clara si falta FRONTEND_URL en producción
+if (IS_PROD && !process.env.FRONTEND_URL) {
+  console.error('❌ CORS ERROR: FRONTEND_URL no está definida en las variables de entorno.');
+  console.error('   Ve a Railway → Variables → agrega FRONTEND_URL=https://tu-app.vercel.app');
+  console.error('   Sin esto, NINGÚN request del frontend funcionará.');
+}
+
+console.log(`[CORS] Orígenes permitidos: ${ALLOWED_ORIGINS.join(', ') || '(ninguno — configura FRONTEND_URL)'}`);
+
 const corsMiddleware = cors({
   origin: (origin, callback) => {
-    // Requests sin origin (mobile apps, curl en dev)
+    // Sin origin: requests directos (Postman, curl, health checks internos)
     if (!origin) {
-      if (IS_PROD) return callback(null, false); // Bloquear en prod
+      // En prod solo bloquear si hay lista definida (evitar romper health checks de Railway)
+      if (IS_PROD && ALLOWED_ORIGINS.length > 0) return callback(null, false);
       return callback(null, true);
     }
     if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    // En dev, loggear intento de origen no permitido
-    if (!IS_PROD) console.warn(`[CORS] Origen rechazado: ${origin}`);
-    callback(new Error(`CORS: origen no permitido`));
+    console.warn(`[CORS] Origen bloqueado: ${origin}`);
+    // Devolver false (no error) para que el browser reciba 200 sin header CORS
+    // — más seguro que lanzar error que podría exponer info
+    callback(null, false);
   },
-  credentials: true,                                // Para cookies httpOnly
+  credentials: true,                                // Requerido para cookies httpOnly
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   exposedHeaders: ['X-RateLimit-Remaining'],
+  optionsSuccessStatus: 200,                        // Algunos browsers viejos usan 204
 });
 
 // ─── FASE 1: Rate Limiting ────────────────────────────────────────────────────
