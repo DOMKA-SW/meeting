@@ -248,6 +248,7 @@ export function RecordingProvider({ children }) {
       }, 1000);
       startProgressPolling(mid);
       setIsRecording(true);
+      window.dispatchEvent(new CustomEvent('recording:started')); // pausa timer inactividad
       return true;
     } catch (err) {
       console.error('Error iniciando reunión:', err);
@@ -276,6 +277,7 @@ export function RecordingProvider({ children }) {
     micStreamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null; micStreamRef.current = null;
     setIsRecording(false); setMeetingId(null);
+    window.dispatchEvent(new CustomEvent('recording:stopped')); // reanuda timer inactividad
     setChunkNumber(0); setDuration(0); setStatusMsg(''); setAudioSource('');
     setProgress({ chunksTotal:0, chunksProcessed:0, sectionsGenerated:0, transcriptionLines:0 });
     chunksRef.current = []; mediaRecorderRef.current = null;
