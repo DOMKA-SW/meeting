@@ -14,7 +14,24 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
 const app = express();
-app.use(cors({ origin:'*', methods:['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders:['Content-Type','Authorization'] }));
+const allowedOrigins = [
+  'https://meeting-virid-five.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+];
+app.use(cors({
+  origin: (origin, callback) => {
+    // Permitir requests sin origin (ej: Postman, mobile apps)
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS: origen no permitido → ${origin}`));
+    }
+  },
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  credentials: true,   // ← necesario para cookies/tokens con credentials:'include'
+}));
 app.use(express.json({ limit:'10mb' }));
 app.use((req,res,next)=>{ console.log(`${new Date().toISOString()} ${req.method} ${req.path}`); next(); });
 
