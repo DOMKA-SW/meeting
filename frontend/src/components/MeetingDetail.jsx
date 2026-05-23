@@ -789,7 +789,7 @@ function MeetingDetail() {
                 </div>
               )}
 
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+              <div>
                 <div style={{ padding:20, border:'1px solid #e8ecf0', borderRadius:10, backgroundColor:'white' }}>
                   <h3 style={{ marginBottom:18, color:'#1565C0', borderBottom:'2px solid #E3F2FD', paddingBottom:8 }}>Vista del Acta</h3>
 
