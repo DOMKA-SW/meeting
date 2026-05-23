@@ -418,14 +418,26 @@ function AttachmentsPanel({ meetingId }) {
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                   {att.file_type === 'document' && (
-                    <a
-                      href={`${import.meta.env.VITE_API_BASE_URL}/meetings/${meetingId}/attachments/${att.id}/download`}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ padding: '6px 10px', backgroundColor: '#e3f2fd', color: '#1565C0', border: '1px solid #90CAF9', borderRadius: 5, fontSize: 12, textDecoration: 'none', fontWeight: 600 }}
-                    >
-                      ⬇️ Descargar
-                    </a>
+                    <button
+  onClick={async () => {
+    const token = localStorage.getItem('auth_token');
+    const res = await fetch(
+      `${import.meta.env.VITE_API_BASE_URL}/meetings/${meetingId}/attachments/${att.id}/download`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) { alert('Error al descargar'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = att.file_name; a.click();
+    URL.revokeObjectURL(url);
+  }}
+  style={{ padding:'6px 10px', backgroundColor:'#e3f2fd', color:'#1565C0',
+    border:'1px solid #90CAF9', borderRadius:5, fontSize:12, cursor:'pointer', fontWeight:600 }}
+>
+  ⬇️ Descargar
+</button>
+
                   )}
                   <button
                     onClick={() => handleDeleteAttachment(att.id)}
