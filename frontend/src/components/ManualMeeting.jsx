@@ -15,7 +15,7 @@ TEMAS TRATADOS:
 COMPROMISOS:
 - Compromiso 1 
 - Compromiso 2
-- Compromiso 3',
+- Compromiso 3,
   transcripcion: `[A]
 [B]
 [C]
@@ -32,7 +32,7 @@ Aaprobados.
 Compromisos:
 - Compromiso 1 
 - Compromiso 2
-- Compromiso 3',
+- Compromiso 3`,
 
 Saludos,`
 };
