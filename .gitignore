@@ -1,6 +1,6 @@
 node_modules/
-backend/.env
+.env
 storage/
-*.db
+frontend/dist/
 *.log
 .DS_Store
