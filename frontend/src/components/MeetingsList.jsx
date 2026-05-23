@@ -14,7 +14,7 @@ export default function MeetingsList() {
 
   const fetchMeetings = async () => {
     try {
-      const r = await apiFetch('/meetings?user_id=user1');
+      const r = await apiFetch('/meetings');
       if (r.ok) setMeetings(await r.json());
       setLoading(false);
     } catch { setLoading(false); }
