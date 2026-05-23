@@ -251,7 +251,8 @@ const createSuperadmin = async () => {
     const [rows] = await db.execute("SELECT id FROM users WHERE role='superadmin'");
     if (rows.length > 0) return;
     const [comp] = await db.execute("INSERT INTO companies (name,slug) VALUES ('Mi Empresa','mi-empresa')");
-    const pwd = process.env.SUPERADMIN_PASSWORD || 'superadmin2025';
+    const pwd = process.env.SUPERADMIN_PASSWORD;
+       if (!pwd) { console.error('SUPERADMIN_PASSWORD no definido'); return; }
     await db.execute('INSERT INTO users (company_id,name,email,password_hash,role) VALUES (?,?,?,?,?)',
       [comp.insertId, 'Super Admin', SUPERADMIN_EMAIL, await hashPwd(pwd), 'superadmin']);
     console.log(`✅ Superadmin creado: ${SUPERADMIN_EMAIL}`);
