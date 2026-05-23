@@ -17,6 +17,10 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
 const app = express();
+// ── Logging de errores no capturados ─────────────────────────────────────────
+process.on('uncaughtException',  (err) => console.error('[uncaughtException]',  err.message));
+process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err?.message || err));
+
 
 // ─── Seguridad: Helmet (cabeceras HTTP seguras) ───────────────────────────────
 app.use(helmet({
@@ -86,9 +90,17 @@ const attachmentPath  = process.env.ATTACH_PATH  || path.join(__dirname,'..','st
 fs.mkdirSync(storagePath,    { recursive: true });
 fs.mkdirSync(attachmentPath, { recursive: true });
 
-// ─── Auth ─────────────────────────────────────────────────────────────────────
-const JWT_SECRET       = process.env.JWT_SECRET       || 'meeting-secret-change-in-prod';
-const SUPERADMIN_EMAIL = process.env.SUPERADMIN_EMAIL || 'admin@actas.com';
+// ── Validar secretos obligatorios ──────────────────────────────────────────────
+if (!process.env.JWT_SECRET) {
+  console.error('❌ FATAL: JWT_SECRET no está definido en .env');
+  process.exit(1);
+}
+if (!process.env.SUPERADMIN_PASSWORD) {
+  console.error('❌ FATAL: SUPERADMIN_PASSWORD no está definido en .env');
+  process.exit(1);
+}
+const JWT_SECRET       = process.env.JWT_SECRET;
+const SUPERADMIN_EMAIL = process.env.SUPERADMIN_EMAIL || 'admin@dataella.tech';
 
 // Hash legacy SHA-256 (solo para migración de contraseñas antiguas)
 const sha256Hash = pwd => crypto.createHash('sha256').update(pwd + JWT_SECRET).digest('hex');
@@ -250,7 +262,19 @@ const createSuperadmin = async () => {
 // ─── Groq ─────────────────────────────────────────────────────────────────────
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const groq   = new OpenAI({ apiKey: GROQ_API_KEY||'dummy', baseURL: 'https://api.groq.com/openai/v1' });
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 },  // 100 MB máximo
+  fileFilter: (req, file, cb) => {
+    const allowed = ['audio/webm','audio/mp3','audio/mpeg','audio/wav',
+      'audio/m4a','audio/ogg','audio/flac','audio/aac',
+      'application/pdf','image/jpeg','image/png','image/gif',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Tipo de archivo no permitido: ' + file.mimetype));
+  }
+});
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const sleep      = ms => new Promise(r => setTimeout(r, ms));
@@ -648,7 +672,7 @@ app.post('/login', async (req, res) => {
 
     const token = jwt.sign(
       { id:u.id, email:u.email, name:u.name, role:u.role, company_id:u.company_id, company_name:u.company_name, company_slug:u.company_slug },
-      JWT_SECRET, { expiresIn: '30d' }
+      JWT_SECRET, { expiresIn: '8h' }
     );
     res.json({ token, user:{ id:u.id, name:u.name, email:u.email, role:u.role, company_name:u.company_name } });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -693,7 +717,7 @@ app.post('/auth/refresh', async (req, res) => {
     if (!u) return res.status(401).json({ error: 'Usuario inactivo o no encontrado' });
     const token = jwt.sign(
       { id:u.id, email:u.email, name:u.name, role:u.role, company_id:u.company_id, company_name:u.company_name, company_slug:u.company_slug },
-      JWT_SECRET, { expiresIn: '30d' }
+      JWT_SECRET, { expiresIn: '8h' }
     );
     res.json({ token });
   } catch {
@@ -946,12 +970,17 @@ app.get('/meetings/:id', async (req, res) => {
 });
 
 app.get('/meetings/:id/transcription', async (req, res) => {
-  try { const [r] = await db.execute('SELECT * FROM transcriptions WHERE meeting_id=? ORDER BY chunk_number,id', [req.params.id]); res.json(r); }
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
+    const [r] = await db.execute('SELECT * FROM transcriptions WHERE meeting_id=? ORDER BY chunk_number,id', [req.params.id]); res.json(r); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/meetings/:id/acta', async (req, res) => {
   try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
     const [[m]] = await db.execute('SELECT status,approved_at,approved_by_client FROM meetings WHERE id=?', [req.params.id]);
     if (!m) return res.status(404).json({ error: 'Not found' });
     const [a] = await db.execute('SELECT acta_json FROM actas WHERE meeting_id=?', [req.params.id]);
