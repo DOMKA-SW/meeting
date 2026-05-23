@@ -212,7 +212,6 @@ export function RecordingProvider({ children }) {
       const res = await apiFetch('/startMeeting', {
         method: 'POST',
         body: JSON.stringify({
-          user_id: 'user1',
           cliente: form.cliente.trim(),
           proyecto: form.proyecto.trim(),
           responsable: form.responsable.trim(),
