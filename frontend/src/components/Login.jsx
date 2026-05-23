@@ -39,7 +39,7 @@ export default function Login() {
             {loading?'⏳ Verificando...':'→ Ingresar'}
           </button>
         </form>
-        <p style={{ textAlign:'center', marginTop:20, fontSize:12, color:'#475569' }}>Sesión de 30 días</p>
+        <p style={{ textAlign:'center', marginTop:20, fontSize:12, color:'#475569' }}>  Sesión de 8 horas · se renueva automáticamente</p>
       </div>
     </div>
   );
