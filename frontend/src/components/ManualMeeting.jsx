@@ -3,49 +3,38 @@ import { useNavigate } from 'react-router-dom';
 import { apiFetch } from '../utils/api';
 
 const EJEMPLOS = {
-  notas: `Reunión de seguimiento proyecto App Móvil - 23 Feb 2026
+  notas: `Reunión de seguimiento proyecto  - 23 Feb 2026
 
-Asistentes: Juan (PM), María (Dev), Carlos (QA), Ana (Diseño)
+Asistentes: A, B, C, D
 
 TEMAS TRATADOS:
-- Revisamos el avance del sprint 4. María reportó que el módulo de login está completo al 90%.
-- Carlos encontró 3 bugs críticos en el flujo de pago. Hay que resolverlos antes del lunes.
-- Ana mostró los nuevos diseños de onboarding, quedaron aprobados por el equipo.
+- Tema 1
+- Tema 2
+- Tema 3
 
 COMPROMISOS:
-- María va a terminar el módulo de login el viernes 28
-- Carlos debe documentar los bugs en Jira hoy mismo
-- Juan tiene que coordinar la fecha de UAT con el cliente para la semana del 3 de marzo`,
-  transcripcion: `[Juan]: Bueno, empecemos revisando el estado del sprint 4. María, ¿cómo vamos con el módulo de login?
-
-[María]: El módulo está al 90%. Me falta terminar las pruebas. Lo entrego el viernes.
-
-[Carlos]: Yo encontré tres bugs críticos en el flujo de pagos. Necesitamos resolverlos antes del lunes o no podemos lanzar.
-
-[Juan]: Entendido. Carlos, ¿puedes documentarlos en Jira hoy mismo para que el equipo los tome mañana?
-
-[Carlos]: Sí, lo hago esta tarde.
-
-[Ana]: Los diseños de onboarding están listos. ¿Los podemos aprobar hoy?
-
-[Juan]: Los revisé, están muy bien. Aprobados. Ana, genera los assets para entrega la próxima semana.`,
+- Compromiso 1 
+- Compromiso 2
+- Compromiso 3,
+  transcripcion: `[A]
+[B]
+[C]
+[D]
+`,
   email: `Asunto: Resumen reunión App Móvil - 23 Feb
 
-Hola equipo,
-
+Hola,
 Les comparto el resumen de la reunión de hoy:
-
-Revisamos el sprint 4. El módulo de login está casi listo (María lo entrega el viernes). Carlos identificó 3 bugs críticos en pagos que bloquean el lanzamiento — los va a documentar en Jira hoy.
-
-Los diseños de onboarding de Ana quedaron aprobados.
+Revisamos ....
+  
+Aaprobados.
 
 Compromisos:
-- María: módulo de login listo el viernes 28
-- Carlos: bugs documentados en Jira hoy  
-- Juan: coordinar UAT con cliente semana del 3/3
+- Compromiso 1 
+- Compromiso 2
+- Compromiso 3
 
-Saludos,
-Juan`
+Saludos,`
 };
 
 const labelStyle = { display:'block', marginBottom:5, fontSize:13, fontWeight:600, color:'#444' };
@@ -122,7 +111,7 @@ export default function ManualMeeting() {
       const res = await apiFetch('/meetings/from-text', {
         method:'POST',
         body: JSON.stringify({
-          user_id:'user1', cliente:form.cliente.trim(), proyecto:form.proyecto.trim(),
+          cliente:form.cliente.trim(), proyecto:form.proyecto.trim(),
           responsable:form.responsable.trim(), participantes:participantesArr,
           texto:texto.trim(), modo, fecha:fecha||null, hora_inicio:horaInicio,
           hora_fin:horaFin, linked_meeting_id:form.linked_meeting_id||null,
