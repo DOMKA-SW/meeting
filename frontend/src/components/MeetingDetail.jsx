@@ -417,28 +417,25 @@ function AttachmentsPanel({ meetingId }) {
                   )}
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                  {att.file_type === 'document' && (
-                    <button
-  onClick={async () => {
-    const token = localStorage.getItem('auth_token');
-    const res = await fetch(
-      `${import.meta.env.VITE_API_BASE_URL}/meetings/${meetingId}/attachments/${att.id}/download`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (!res.ok) { alert('Error al descargar'); return; }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = att.file_name; a.click();
-    URL.revokeObjectURL(url);
-  }}
-  style={{ padding:'6px 10px', backgroundColor:'#e3f2fd', color:'#1565C0',
-    border:'1px solid #90CAF9', borderRadius:5, fontSize:12, cursor:'pointer', fontWeight:600 }}
->
-  ⬇️ Descargar
-</button>
-
-                  )}
+                  <button
+                    onClick={async () => {
+                      const token = localStorage.getItem('auth_token');
+                      const res = await fetch(
+                        `${import.meta.env.VITE_API_BASE_URL}/meetings/${meetingId}/attachments/${att.id}/download`,
+                        { headers: { Authorization: `Bearer ${token}` } }
+                      );
+                      if (!res.ok) { alert('Error al descargar'); return; }
+                      const blob = await res.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url; a.download = att.file_name; a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                    style={{ padding:'6px 10px', backgroundColor:'#e3f2fd', color:'#1565C0',
+                      border:'1px solid #90CAF9', borderRadius:5, fontSize:12, cursor:'pointer', fontWeight:600 }}
+                  >
+                    ⬇️ Descargar
+                  </button>
                   <button
                     onClick={() => handleDeleteAttachment(att.id)}
                     style={{ padding: '6px 10px', backgroundColor: '#fff8f8', color: '#c62828', border: '1px solid #ffcdd2', borderRadius: 5, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
@@ -733,13 +730,31 @@ function MeetingDetail() {
               <p>Puede estar procesándose o no hay cuota disponible en Groq.</p>
             </div>
           ) : (
-            <div style={{ maxHeight:500, overflowY:'auto', padding:15, backgroundColor:'#f9f9f9', borderRadius:8 }}>
-              {transcription.map((item,index) => (
-                <div key={index} style={{ marginBottom:10, padding:10, backgroundColor:'white', borderRadius:4 }}>
-                  <strong style={{ color:'#2196F3' }}>{item.speaker}:</strong> {item.text}
-                </div>
-              ))}
-            </div>
+            <>
+              <div style={{ maxHeight:500, overflowY:'auto', padding:15, backgroundColor:'#f9f9f9', borderRadius:8 }}>
+                {transcription.map((item,index) => (
+                  <div key={index} style={{ marginBottom:10, padding:10, backgroundColor:'white', borderRadius:4 }}>
+                    <strong style={{ color:'#2196F3' }}>{item.speaker}:</strong> {item.text}
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop:12 }}>
+                <button
+                  onClick={() => {
+                    const text = transcription.map(t => `[${t.speaker}]: ${t.text}`).join('\n');
+                    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a'); a.href = url;
+                    a.download = `Transcripcion_${meeting?.cliente||'reunion'}.txt`; a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                  style={{ padding:'8px 18px', backgroundColor:'#f0fdf4', color:'#15803d',
+                    border:'1px solid #86efac', borderRadius:6, fontSize:13, cursor:'pointer', fontWeight:600 }}
+                >
+                  ⬇️ Descargar transcripción .txt
+                </button>
+              </div>
+            </>
           )}
         </div>
       )}
