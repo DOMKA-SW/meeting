@@ -29,15 +29,14 @@ app.use(helmet({
 }));
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
-// IMPORTANTE: Agrega CORS_ORIGIN en Railway con tu URL de Vercel actual
-// Ejemplo: CORS_ORIGIN=https://meeting-virid-five.vercel.app,https://tu-nuevo-dominio.vercel.app
+// En producción: definir CORS_ORIGIN=https://dataella.tech en .env
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
   : [
-      'https://meeting-virid-five.vercel.app',
       'http://localhost:5173',
       'http://localhost:3000',
     ];
+
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -913,6 +912,8 @@ app.post('/chunk', upload.single('audio'), async (req, res) => {
 
 app.get('/meetings/:id/progress', async (req, res) => {
   try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
     const safeCount = async (sql, params) => {
       const [rows] = await db.execute(sql, params);
       return rows[0] ? Object.values(rows[0])[0] : 0;
@@ -991,6 +992,8 @@ app.get('/meetings/:id/acta', async (req, res) => {
 
 app.put('/meetings/:id/acta', async (req, res) => {
   try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
     if (await isMeetingApproved(req.params.id)) return res.status(403).json({ error: 'Acta aprobada. No se puede modificar.' });
     await db.execute('INSERT INTO actas (meeting_id,acta_json) VALUES (?,?) ON DUPLICATE KEY UPDATE acta_json=VALUES(acta_json)', [req.params.id, JSON.stringify(req.body)]);
     res.json({ ok: true });
@@ -998,12 +1001,17 @@ app.put('/meetings/:id/acta', async (req, res) => {
 });
 
 app.get('/meetings/:id/tareas', async (req, res) => {
-  try { const [r] = await db.execute('SELECT * FROM tareas WHERE meeting_id=? ORDER BY tipo DESC,id', [req.params.id]); res.json(r); }
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
+    const [r] = await db.execute('SELECT * FROM tareas WHERE meeting_id=? ORDER BY tipo DESC,id', [req.params.id]); res.json(r); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.put('/meetings/:id/tareas', async (req, res) => {
   try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
     if (await isMeetingApproved(req.params.id)) return res.status(403).json({ error: 'Acta aprobada. No se puede modificar.' });
     const tareas = Array.isArray(req.body) ? req.body : req.body?.tareas;
     if (!Array.isArray(tareas)) return res.status(400).json({ error: 'array required' });
@@ -1016,6 +1024,8 @@ app.put('/meetings/:id/tareas', async (req, res) => {
 
 app.post('/meetings/:id/reprocess-acta', async (req, res) => {
   try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
     if (await isMeetingApproved(req.params.id)) return res.status(403).json({ error: 'Acta aprobada. No se puede reprocesar.' });
     await db.execute('DELETE FROM tareas WHERE meeting_id=?', [req.params.id]);
     await db.execute('DELETE FROM actas WHERE meeting_id=?', [req.params.id]);
@@ -1063,7 +1073,10 @@ app.post('/meetings/from-text', async (req, res) => {
 
 // ─── Notas ────────────────────────────────────────────────────────────────────
 app.get('/meetings/:id/notes', async (req, res) => {
-  try { const [r] = await db.execute('SELECT * FROM meeting_notes WHERE meeting_id=? ORDER BY created_at', [req.params.id]); res.json(r); }
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
+    const [r] = await db.execute('SELECT * FROM meeting_notes WHERE meeting_id=? ORDER BY created_at', [req.params.id]); res.json(r); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1079,19 +1092,27 @@ app.post('/meetings/:id/notes', async (req, res) => {
 });
 
 app.delete('/meetings/:id/notes/:nid', async (req, res) => {
-  try { await db.execute('DELETE FROM meeting_notes WHERE id=? AND meeting_id=?', [req.params.nid, req.params.id]); res.json({ ok: true }); }
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
+    await db.execute('DELETE FROM meeting_notes WHERE id=?', [req.params.nid, req.params.id]); res.json({ ok: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── Adjuntos ─────────────────────────────────────────────────────────────────
 app.get('/meetings/:id/attachments', async (req, res) => {
-  try { const [r] = await db.execute('SELECT id,meeting_id,file_name,file_type,mime_type,transcription_status,uploaded_at FROM meeting_attachments WHERE meeting_id=? ORDER BY uploaded_at', [req.params.id]); res.json(r); }
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
+    const [r] = await db.execute('SELECT id,meeting_id,file_name,file_type,mime_type,transcription_status,uploaded_at FROM meeting_attachments WHERE meeting_id=? ORDER BY uploaded_at', [req.params.id]); res.json(r); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/meetings/:id/attachments', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No archivo' });
   try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
     const [[m]] = await db.execute('SELECT id,participantes,cliente,proyecto,terminology FROM meetings WHERE id=?', [req.params.id]);
     if (!m) return res.status(404).json({ error: 'No encontrada' });
     const mime    = req.file.mimetype || '';
@@ -1113,6 +1134,8 @@ app.post('/meetings/:id/attachments', upload.single('file'), async (req, res) =>
 
 app.delete('/meetings/:id/attachments/:aid', async (req, res) => {
   try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
     const [[r]] = await db.execute('SELECT file_path FROM meeting_attachments WHERE id=? AND meeting_id=?', [req.params.aid, req.params.id]);
     if (!r) return res.status(404).json({ error: 'No encontrado' });
     await db.execute('DELETE FROM meeting_attachments WHERE id=?', [req.params.aid]);
