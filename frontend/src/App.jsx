@@ -75,8 +75,19 @@ function TopBar() {
   );
 }
 
+
+
 function AppLayout() {
   const { isRecording } = useRecording();
+
+  const AdminRoute = ({ children }) => {
+  const { user } = useAuth();
+  if (!user || (user.role !== 'admin' && user.role !== 'superadmin'))
+    return <div style={{padding:40,color:'#c62828'}}>⛔ Acceso restringido a administradores.</div>;
+  return children;
+};
+
+  
   return (
     <div className="lobby-container" style={{ paddingBottom:isRecording?60:0 }}>
       <aside className="sidebar">
@@ -91,8 +102,8 @@ function AppLayout() {
             <Route path="/manual"       element={<ManualMeeting />} />
             <Route path="/meetings"     element={<MeetingsList />} />
             <Route path="/meetings/:id" element={<MeetingDetail />} />
-            <Route path="/users"        element={<UsersAdmin />} />
-            <Route path="/clients"      element={<ClientsAdmin />} />
+            <Route path="/users"   element={<AdminRoute><UsersAdmin /></AdminRoute>} />
+            <Route path="/clients" element={<AdminRoute><ClientsAdmin /></AdminRoute>} />
           </Routes>
         </div>
       </main>
