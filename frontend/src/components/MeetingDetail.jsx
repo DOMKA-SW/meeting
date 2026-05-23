@@ -25,67 +25,103 @@ function generarPDF(acta, meeting) {
   const doc   = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
-  const margin   = 20;
-  const contentW = pageW - margin * 2;
-  let y = 20;
-
-  const colors = { black:[0,0,0], darkGray:[80,80,80], gray:[130,130,130], lightGray:[245,245,245], border:[180,180,180] };
-  const checkPage = (n=10) => { if (y+n > pageH-20) { doc.addPage(); y=20; } };
+  const margin = 18; const contentW = pageW - margin * 2;
+  let y = 0;
+  // — Cabecera azul corporativa —
+  doc.setFillColor(30, 58, 95);
+  doc.rect(0, 0, pageW, 28, 'F');
+  doc.setFont('helvetica','bold'); doc.setFontSize(14);
+  doc.setTextColor(255, 255, 255);
+  doc.text('ACTA DE REUNIÓN', margin, 12);
+  doc.setFontSize(9); doc.setFont('helvetica','normal');
+  doc.text('dataella.tech', pageW - margin, 12, { align: 'right' });
+  doc.setFontSize(8);
+  doc.text(`Generado: ${new Date().toLocaleDateString('es-ES')}`, pageW - margin, 20, { align: 'right' });
+  y = 36;
+  const colors = { black:[15,23,42], dark:[55,65,81], gray:[107,114,128],
+    light:[248,250,252], border:[199,212,232], accent:[37,99,235] };
+  const checkPage = (n=10) => {
+    if (y + n > pageH - 18) {
+      doc.addPage();
+      doc.setFillColor(30, 58, 95);
+      doc.rect(0, 0, pageW, 8, 'F');
+      y = 16;
+    }
+  };
   const sectionTitle = (text) => {
-    checkPage(14); doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(...colors.black);
-    doc.text(text.toUpperCase(), margin, y); y+=2; doc.setDrawColor(...colors.black);
-    doc.line(margin, y, margin+contentW, y); y+=8;
+    checkPage(14);
+    doc.setFillColor(...colors.accent);
+    doc.rect(margin, y, contentW, 7, 'F');
+    doc.setFont('helvetica','bold'); doc.setFontSize(9);
+    doc.setTextColor(255,255,255);
+    doc.text(text.toUpperCase(), margin + 3, y + 5);
+    y += 11;
+    doc.setTextColor(...colors.black);
   };
   const textBlock = (text) => {
-    if (!text) return; doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...colors.darkGray);
-    doc.splitTextToSize(String(text), contentW).forEach(l => { checkPage(6); doc.text(l, margin, y); y+=5; }); y+=4;
+    if (!text) return;
+    doc.setFont('helvetica','normal'); doc.setFontSize(9);
+    doc.setTextColor(...colors.dark);
+    doc.splitTextToSize(String(text), contentW).forEach(l => {
+      checkPage(6); doc.text(l, margin, y); y += 5;
+    }); y += 3;
   };
-
-  doc.setFont('helvetica','bold'); doc.setFontSize(14); doc.setTextColor(...colors.black);
-  doc.text('ACTA DE REUNIÓN', pageW/2, y, {align:'center'}); y+=10;
-  doc.setFontSize(9); doc.setFont('helvetica','normal');
-  doc.text(`Generado el ${new Date().toLocaleDateString('es-ES')}`, pageW/2, y, {align:'center'}); y+=12;
-
-  sectionTitle('Identificación');
+  // — Identificación —
+  sectionTitle('Identificación de la reunión');
   const id = acta.identificacion || {};
   const startedDate = meeting?.started_at ? new Date(meeting.started_at) : null;
   const endedDate   = meeting?.ended_at   ? new Date(meeting.ended_at)   : null;
-  [['Cliente',id.cliente],['Proyecto',id.proyecto],['Responsable',id.responsable],
-   ['Fecha', id.fecha||(startedDate?startedDate.toISOString().split('T')[0]:'')],
-   ['Hora inicio', id.hora_inicio||(startedDate?startedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):'')],
-   ['Hora fin',    id.hora_fin   ||(endedDate  ?endedDate.toLocaleTimeString(  'es-ES',{hour:'2-digit',minute:'2-digit'}):'')],
-   ['Participantes', Array.isArray(id.participantes)?id.participantes.join(', '):id.participantes]
-  ].forEach(([label,value]) => {
-    checkPage(6); doc.setFont('helvetica','bold'); doc.text(label+':', margin, y);
-    doc.setFont('helvetica','normal'); doc.text(String(value||'—'), margin+40, y); y+=6;
-  }); y+=6;
-
-  const tableOpts = (head, body) => ({
-    margin:{left:margin,right:margin}, head, body,
-    styles:{fontSize:8.5,cellPadding:3,textColor:colors.black,lineColor:colors.border,lineWidth:0.1},
-    headStyles:{fillColor:colors.lightGray,textColor:colors.black,fontStyle:'bold'}
+  const fields = [
+    ['Cliente', id.cliente],
+    ['Proyecto', id.proyecto],
+    ['Responsable', id.responsable],
+    ['Fecha', id.fecha||(startedDate?startedDate.toISOString().split('T')[0]:'')],
+    ['Hora inicio', id.hora_inicio||(startedDate?startedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):'' )],
+    ['Hora fin', id.hora_fin||(endedDate?endedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):'' )],
+    ['Participantes', Array.isArray(id.participantes)?id.participantes.join(', '):id.participantes],
+  ];
+  fields.forEach(([lbl, val], i) => {
+    checkPage(7);
+    if (i % 2 === 0) { doc.setFillColor(...colors.light); doc.rect(margin, y-3, contentW, 7, 'F'); }
+    doc.setFont('helvetica','bold'); doc.setFontSize(8.5); doc.setTextColor(...colors.gray);
+    doc.text(lbl.toUpperCase(), margin + 2, y + 1);
+    doc.setFont('helvetica','normal'); doc.setTextColor(...colors.black);
+    doc.text(String(val||'—'), margin + 38, y + 1);
+    y += 7;
   });
-
-  sectionTitle('Tareas Anteriores');
-  const tareasAnt = acta.tareas_anteriores||[];
-  if (!tareasAnt.length) { doc.setFontSize(9); doc.setTextColor(...colors.gray); doc.text('No hay tareas anteriores.', margin, y); y+=8; }
-  else { autoTable(doc,{startY:y,...tableOpts([['ID','Descripción','Responsable','Estado','Proyecto']], tareasAnt.map((t,i)=>[t.id||i+1,t.descripcion||'',t.responsable||'',t.estado||'',t.proyecto||id.proyecto||'']))}); y=doc.lastAutoTable.finalY+8; }
-
-  sectionTitle('Tareas Nuevas');
-  const tareasNuevas = acta.tareas_nuevas||[];
-  if (!tareasNuevas.length) { doc.setFontSize(9); doc.setTextColor(...colors.gray); doc.text('No hay tareas nuevas.', margin, y); y+=8; }
-  else { autoTable(doc,{startY:y,...tableOpts([['ID','Descripción','Responsable','Fecha fin','Proyecto']], tareasNuevas.map((t,i)=>[t.id||`tarea_${i+1}`,t.descripcion||'',t.responsable||'',t.fecha_compromiso||'',t.proyecto||id.proyecto||'']))}); y=doc.lastAutoTable.finalY+8; }
-
-  sectionTitle('Resumen de la Reunión'); textBlock(acta.resumen_reunion);
-  if (acta.observaciones_generales) { sectionTitle('Observaciones Generales'); textBlock(acta.observaciones_generales); }
-
-  for (let i=1; i<=doc.internal.getNumberOfPages(); i++) {
-    doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(...colors.gray);
-    doc.text(`Página ${i} de ${doc.internal.getNumberOfPages()}`, pageW-margin, pageH-10, {align:'right'});
-    doc.text('Documento generado automáticamente', margin, pageH-10);
+  y += 4;
+  const tableOpts = (head, body) => ({
+    margin: { left: margin, right: margin }, startY: y, head, body,
+    styles: { fontSize:8.5, cellPadding:3, textColor:colors.black, lineColor:colors.border, lineWidth:0.15 },
+    headStyles: { fillColor:[30,58,95], textColor:[255,255,255], fontStyle:'bold', fontSize:8.5 },
+    alternateRowStyles: { fillColor: colors.light },
+    didDrawPage: () => { y = doc.lastAutoTable?.finalY + 6 || y; }
+  });
+  // — Tareas anteriores —
+  sectionTitle('Tareas anteriores');
+  const tareasAnt = acta.tareas_anteriores || [];
+  if (!tareasAnt.length) { doc.setFontSize(9); doc.setTextColor(...colors.gray); doc.text('Sin tareas anteriores.', margin, y); y+=8; }
+  else { autoTable(doc, tableOpts([['ID','Descripción','Responsable','Estado']], tareasAnt.map(t=>[t.id||'',t.descripcion||'',t.responsable||'',t.estado||'']))); y=doc.lastAutoTable.finalY+8; }
+  // — Tareas nuevas —
+  checkPage(20); sectionTitle('Tareas nuevas con fecha de compromiso');
+  const tareasNuevas = acta.tareas_nuevas || [];
+  if (!tareasNuevas.length) { doc.setFontSize(9); doc.setTextColor(...colors.gray); doc.text('Sin tareas nuevas.', margin, y); y+=8; }
+  else { autoTable(doc, tableOpts([['ID','Descripción','Responsable','Fecha compromiso']], tareasNuevas.map(t=>[t.id||'',t.descripcion||'',t.responsable||'',t.fecha_compromiso||'']))); y=doc.lastAutoTable.finalY+8; }
+  // — Resumen —
+  checkPage(20); sectionTitle('Resumen ejecutivo de la reunión');
+  textBlock(acta.resumen_reunion);
+  if (acta.observaciones_generales) { checkPage(20); sectionTitle('Observaciones generales'); textBlock(acta.observaciones_generales); }
+  // — Footer con numeración —
+  const total = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i);
+    doc.setFillColor(30, 58, 95); doc.rect(0, pageH-10, pageW, 10, 'F');
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(255,255,255);
+    doc.text(`Sistema de Actas · dataella.tech`, margin, pageH-4);
+    doc.text(`Página ${i} de ${total}`, pageW-margin, pageH-4, { align:'right' });
   }
-  const cf = id.cliente?id.cliente.replace(/[^a-z0-9]/gi,'_'):'acta';
-  const ff = id.fecha?id.fecha.replace(/-/g,''):'sin_fecha';
+  const cf = (id.cliente||'acta').replace(/[^a-z0-9]/gi,'_');
+  const ff = (id.fecha||'sin_fecha').replace(/-/g,'');
   doc.save(`Acta_${cf}_${ff}.pdf`);
 }
 
@@ -132,7 +168,7 @@ function ModalEditarTarea({ tarea, onSave, onClose, mostrarFecha = true }) {
             <label style={labelStyle}>Descripción</label>
             <textarea value={form.descripcion||''} onChange={e=>set('descripcion',e.target.value)} rows={4} style={{...inputStyle, resize:'vertical', lineHeight:1.5}} placeholder="Describe la tarea..." />
           </div>
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+          <div>
             <div><label style={labelStyle}>Responsable</label><input value={form.responsable||''} onChange={e=>set('responsable',e.target.value)} style={inputStyle} /></div>
             <div>
               <label style={labelStyle}>Estado</label>
@@ -775,13 +811,6 @@ function MeetingDetail() {
                       </p>
                     )}
                   </div>
-                </div>
-
-                <div style={{ padding:16, border:'1px solid #e8ecf0', borderRadius:10 }}>
-                  <h3 style={{ marginBottom:10 }}>JSON Raw</h3>
-                  <pre style={{ margin:0, maxHeight:600, overflow:'auto', padding:12, background:'#f8f9fa', borderRadius:6, fontSize:11, lineHeight:1.5 }}>
-                    {JSON.stringify(actaDraft,null,2)}
-                  </pre>
                 </div>
               </div>
             </div>
