@@ -636,7 +636,7 @@ const procChunk = async (fp, mid, cn, parts=[], cli='', proj='', term='') => {
   try { mp = await toMp3(fp); if (mp && fs.existsSync(mp) && fs.statSync(mp).size > 1000) fs2 = mp; } catch(_) {}
   try {
     if (fs.statSync(fs2).size/1024 < 1) { await db.execute('UPDATE chunks SET processed=1 WHERE meeting_id=? AND chunk_number=?', [mid, cn]); return null; }
-    const tr = await groq.audio.transcriptions.create({ file: fs.createReadStream(fs2), model: WHISPER_MODEL', response_format:'verbose_json', language:'es', prompt:whisperPrompt(parts,cli,proj,term) });
+    const tr = await groq.audio.transcriptions.create({ file: fs.createReadStream(fs2), model: WHISPER_MODEL, response_format:'verbose_json', language:'es', prompt:whisperPrompt(parts,cli,proj,term) });
     const segs = Array.isArray(tr.segments) ? tr.segments : [];
     if (segs.length > 0) {
       let sc = 1; const sm = {};
@@ -669,7 +669,7 @@ const procAudio = async (aid, fp, mid, parts=[], cli='', proj='', term='') => {
   try { mp = await toMp3(fp); if (mp && fs.existsSync(mp) && fs.statSync(mp).size > 1000) fs2 = mp; } catch(_) {}
   try {
     if (fs.statSync(fs2).size/1024 < 1) { await db.execute('UPDATE meeting_attachments SET transcription_status=?,transcription=? WHERE id=?', ['done','',aid]); return; }
-    const tr = await groq.audio.transcriptions.create({ file: fs.createReadStream(fs2), model: WHISPER_MODEL', response_format:'verbose_json', language:'es', prompt:whisperPrompt(parts,cli,proj,term) });
+    const tr = await groq.audio.transcriptions.create({ file: fs.createReadStream(fs2), model: WHISPER_MODEL, response_format:'verbose_json', language:'es', prompt:whisperPrompt(parts,cli,proj,term) });
     let text = ''; const segs = Array.isArray(tr.segments) ? tr.segments : [];
     if (segs.length) text = segs.filter(s=>(s.text||'').trim()).map(s=>s.text.trim()).join(' ');
     else if (tr.text?.trim()) text = tr.text.trim();
@@ -1122,6 +1122,8 @@ app.post('/meetings/:id/notes', async (req, res) => {
   const { content='', author='' } = req.body;
   if (!content.trim()) return res.status(400).json({ error: 'Vacío' });
   try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
     if (await isMeetingApproved(req.params.id)) return res.status(403).json({ error: 'Acta aprobada.' });
     const [r] = await db.execute('INSERT INTO meeting_notes (meeting_id,user_id,content,author) VALUES (?,?,?,?)',
       [req.params.id, req.user.id, content.trim(), author.trim()||req.user.name]);
@@ -1184,6 +1186,8 @@ app.delete('/meetings/:id/attachments/:aid', async (req, res) => {
 
 app.get('/meetings/:id/attachments/:aid/download', async (req, res) => {
   try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso a esta reunión' });
     const [[r]] = await db.execute('SELECT file_name,file_path,mime_type FROM meeting_attachments WHERE id=? AND meeting_id=?', [req.params.aid, req.params.id]);
     if (!r || !fs.existsSync(r.file_path)) return res.status(404).json({ error: 'No encontrado' });
     res.setHeader('Content-Disposition', `attachment; filename="${r.file_name}"`);
