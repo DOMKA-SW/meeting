@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { apiFetch } from '../utils/api';
 
 const EJEMPLOS = {
-  notas: `Reunión de seguimiento proyecto  - 23 Feb 2026
+  notas: `Reunión de seguimiento proyecto - 23 Feb 2026
 
 Asistentes: A, B, C, D
 
@@ -13,9 +13,9 @@ TEMAS TRATADOS:
 - Tema 3
 
 COMPROMISOS:
-- Compromiso 1 
+- Compromiso 1
 - Compromiso 2
-- Compromiso 3,
+- Compromiso 3`,
   transcripcion: `[A]
 [B]
 [C]
@@ -26,15 +26,15 @@ COMPROMISOS:
 Hola,
 Les comparto el resumen de la reunión de hoy:
 Revisamos ....
-  
-Aaprobados.
+
+Aprobados.
 
 Compromisos:
-- Compromiso 1 
+- Compromiso 1
 - Compromiso 2
-- Compromiso 3`,
+- Compromiso 3
 
-Saludos,`
+Saludos,`,
 };
 
 const labelStyle = { display:'block', marginBottom:5, fontSize:13, fontWeight:600, color:'#444' };
