@@ -260,8 +260,30 @@ const createSuperadmin = async () => {
 };
 
 // ─── Groq ─────────────────────────────────────────────────────────────────────
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const groq   = new OpenAI({ apiKey: GROQ_API_KEY||'dummy', baseURL: 'https://api.groq.com/openai/v1' });
+// ─── Proveedores de IA ────────────────────────────────────────────────────────
+const GROQ_API_KEY   = process.env.GROQ_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const AI_PROVIDER    = (process.env.AI_PROVIDER || 'groq').toLowerCase();
+
+// Groq — siempre activo (Whisper solo funciona aquí)
+const groq = new OpenAI({
+  apiKey:  GROQ_API_KEY || 'dummy',
+  baseURL: 'https://api.groq.com/openai/v1'
+});
+
+// OpenAI — solo si está configurado
+const openaiClient = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+
+// Modelos activos según proveedor
+const LLM_MODEL   = AI_PROVIDER === 'openai'
+  ? (process.env.OPENAI_LLM_MODEL  || 'gpt-4o-mini')
+  : (process.env.GROQ_LLM_MODEL    || 'llama-3.3-70b-versatile');
+
+const FAST_MODEL  = AI_PROVIDER === 'openai' ? 'gpt-4o-mini'      : 'llama-3.1-8b-instant';
+const WHISPER_MODEL = process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3-turbo';
+
+console.log(`🤖 IA: ${AI_PROVIDER.toUpperCase()} | LLM: ${LLM_MODEL} | Whisper: ${WHISPER_MODEL}`);
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024 },  // 100 MB máximo
@@ -284,12 +306,27 @@ const addBizDays = (start, days) => {
   return d.toISOString().split('T')[0];
 };
 const fmtId    = n => `tarea_${String(n).padStart(3,'0')}`;
-const callLLM  = async (prompt, model='llama-3.3-70b-versatile', retries=3) => {
+const callLLM = async (prompt, model = LLM_MODEL, retries = 3) => {
+  const client    = (AI_PROVIDER === 'openai' && openaiClient) ? openaiClient : groq;
+  const useModel  = (model === 'llama-3.3-70b-versatile' || model === 'llama-3.1-8b-instant')
+    ? (model === 'llama-3.1-8b-instant' ? FAST_MODEL : LLM_MODEL)
+    : model;
   for (let i = 0; i <= retries; i++) {
     try {
-      const r = await groq.chat.completions.create({ model, messages:[{role:'user',content:prompt}], temperature:0.1, response_format:{type:'json_object'} });
+      const r = await client.chat.completions.create({
+        model:           use,
+        messages:        [{ role: 'user', content: prompt }],
+        temperature:     0.1,
+        response_format: { type: 'json_object' },
+      });
       return r.choices?.[0]?.message?.content || null;
-    } catch(e) { if (e.status===429 && i<retries) await sleep((i+1)*8000); else throw e; }
+    } catch(e) {
+      if (e.status === 429 && i < retries) {
+        const wait = AI_PROVIDER === 'openai' ? (i+1)*3000 : (i+1)*8000;
+        console.warn(`[callLLM] Rate limit (${useModel}), reintento ${i+1} en ${wait/1000}s`);
+        await sleep(wait);
+      } else throw e;
+    }
   }
   return null;
 };
@@ -599,7 +636,7 @@ const procChunk = async (fp, mid, cn, parts=[], cli='', proj='', term='') => {
   try { mp = await toMp3(fp); if (mp && fs.existsSync(mp) && fs.statSync(mp).size > 1000) fs2 = mp; } catch(_) {}
   try {
     if (fs.statSync(fs2).size/1024 < 1) { await db.execute('UPDATE chunks SET processed=1 WHERE meeting_id=? AND chunk_number=?', [mid, cn]); return null; }
-    const tr = await groq.audio.transcriptions.create({ file: fs.createReadStream(fs2), model:'whisper-large-v3-turbo', response_format:'verbose_json', language:'es', prompt:whisperPrompt(parts,cli,proj,term) });
+    const tr = await groq.audio.transcriptions.create({ file: fs.createReadStream(fs2), model: WHISPER_MODEL', response_format:'verbose_json', language:'es', prompt:whisperPrompt(parts,cli,proj,term) });
     const segs = Array.isArray(tr.segments) ? tr.segments : [];
     if (segs.length > 0) {
       let sc = 1; const sm = {};
@@ -632,7 +669,7 @@ const procAudio = async (aid, fp, mid, parts=[], cli='', proj='', term='') => {
   try { mp = await toMp3(fp); if (mp && fs.existsSync(mp) && fs.statSync(mp).size > 1000) fs2 = mp; } catch(_) {}
   try {
     if (fs.statSync(fs2).size/1024 < 1) { await db.execute('UPDATE meeting_attachments SET transcription_status=?,transcription=? WHERE id=?', ['done','',aid]); return; }
-    const tr = await groq.audio.transcriptions.create({ file: fs.createReadStream(fs2), model:'whisper-large-v3-turbo', response_format:'verbose_json', language:'es', prompt:whisperPrompt(parts,cli,proj,term) });
+    const tr = await groq.audio.transcriptions.create({ file: fs.createReadStream(fs2), model: WHISPER_MODEL', response_format:'verbose_json', language:'es', prompt:whisperPrompt(parts,cli,proj,term) });
     let text = ''; const segs = Array.isArray(tr.segments) ? tr.segments : [];
     if (segs.length) text = segs.filter(s=>(s.text||'').trim()).map(s=>s.text.trim()).join(' ');
     else if (tr.text?.trim()) text = tr.text.trim();
