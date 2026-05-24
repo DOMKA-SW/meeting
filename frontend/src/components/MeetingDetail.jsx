@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import logoGerenteNegocios from '../assets/images/logo_gerentedenegocios.png';
 
 function safeJsonParseArray(s) {
   try { const v = JSON.parse(s); return Array.isArray(v) ? v : []; } catch { return []; }
@@ -21,107 +22,267 @@ const estadoBadge = (estado) => {
 };
 
 // ─── PDF ─────────────────────────────────────────────────────────────────────
-function generarPDF(acta, meeting) {
-  const doc   = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-  const pageW = doc.internal.pageSize.getWidth();
-  const pageH = doc.internal.pageSize.getHeight();
-  const margin = 18; const contentW = pageW - margin * 2;
+function generarPDF(acta, meeting, logoDataUrl) {
+  const doc    = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageW  = doc.internal.pageSize.getWidth();
+  const pageH  = doc.internal.pageSize.getHeight();
+  const margin = 20;
+  const contentW = pageW - margin * 2;
   let y = 0;
-  // — Cabecera azul corporativa —
-  doc.setFillColor(30, 58, 95);
-  doc.rect(0, 0, pageW, 28, 'F');
-  doc.setFont('helvetica','bold'); doc.setFontSize(14);
-  doc.setTextColor(255, 255, 255);
-  doc.text('ACTA DE REUNIÓN', margin, 12);
-  doc.setFontSize(9); doc.setFont('helvetica','normal');
-  doc.text('dataella.tech', pageW - margin, 12, { align: 'right' });
-  doc.setFontSize(8);
-  doc.text(`Generado: ${new Date().toLocaleDateString('es-ES')}`, pageW - margin, 20, { align: 'right' });
-  y = 36;
-  const colors = { black:[15,23,42], dark:[55,65,81], gray:[107,114,128],
-    light:[248,250,252], border:[199,212,232], accent:[37,99,235] };
-  const checkPage = (n=10) => {
-    if (y + n > pageH - 18) {
+
+  // Paleta estrictamente blanco y negro corporativo
+  const C = {
+    black:   [0, 0, 0],
+    darkGray:[40, 40, 40],
+    midGray: [100, 100, 100],
+    softGray:[160, 160, 160],
+    lightBg: [245, 245, 245],
+    white:   [255, 255, 255],
+    ruleLine:[200, 200, 200],
+  };
+
+  // ── Función: añadir marca de agua centrada en cada página ──
+  const addWatermark = () => {
+    if (!logoDataUrl) return;
+    doc.saveGraphicsState();
+    doc.setGState(new doc.GState({ opacity: 0.05 }));
+    const wmW = 120; const wmH = 60;
+    doc.addImage(logoDataUrl, 'PNG',
+      (pageW - wmW) / 2, (pageH - wmH) / 2, wmW, wmH);
+    doc.restoreGraphicsState();
+  };
+
+  // ── Función: cabecera de página ──
+  const drawHeader = (isFirstPage) => {
+    // Banda superior negra
+    doc.setFillColor(...C.black);
+    doc.rect(0, 0, pageW, 22, 'F');
+
+    if (isFirstPage && logoDataUrl) {
+      // Logo a la izquierda en la banda
+      doc.addImage(logoDataUrl, 'PNG', margin, 3, 36, 16);
+    } else {
+      // En páginas internas solo nombre empresa
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(...C.white);
+      doc.text('GERENTE DE NEGOCIOS', margin, 13);
+    }
+
+    // Título del documento alineado a la derecha
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(isFirstPage ? 11 : 8.5);
+    doc.setTextColor(...C.white);
+    doc.text('ACTA DE REUNIÓN', pageW - margin, isFirstPage ? 10 : 11, { align: 'right' });
+    if (isFirstPage) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.setTextColor(...C.softGray);
+      doc.text(`Generado: ${new Date().toLocaleDateString('es-ES', { day:'2-digit', month:'long', year:'numeric' })}`, pageW - margin, 17, { align: 'right' });
+    }
+    addWatermark();
+  };
+
+  // ── Función: pie de página ──
+  const drawFooter = (pageNum, total) => {
+    // Línea separadora
+    doc.setDrawColor(...C.ruleLine);
+    doc.setLineWidth(0.3);
+    doc.line(margin, pageH - 12, pageW - margin, pageH - 12);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(...C.softGray);
+    doc.text('GerentedeNegocios · Sistema de Actas', margin, pageH - 7);
+    doc.text(`Página ${pageNum} de ${total}`, pageW - margin, pageH - 7, { align: 'right' });
+  };
+
+  // ── Función: verificar salto de página ──
+  const checkPage = (needed = 12) => {
+    if (y + needed > pageH - 18) {
       doc.addPage();
-      doc.setFillColor(30, 58, 95);
-      doc.rect(0, 0, pageW, 8, 'F');
-      y = 16;
+      drawHeader(false);
+      y = 30;
     }
   };
+
+  // ── Función: título de sección ──
   const sectionTitle = (text) => {
-    checkPage(14);
-    doc.setFillColor(...colors.accent);
-    doc.rect(margin, y, contentW, 7, 'F');
-    doc.setFont('helvetica','bold'); doc.setFontSize(9);
-    doc.setTextColor(255,255,255);
-    doc.text(text.toUpperCase(), margin + 3, y + 5);
-    y += 11;
-    doc.setTextColor(...colors.black);
+    checkPage(16);
+    y += 4;
+    // Línea izquierda negra + texto en mayúsculas
+    doc.setFillColor(...C.black);
+    doc.rect(margin, y, 3, 6, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(...C.black);
+    doc.text(text.toUpperCase(), margin + 6, y + 4.5);
+    // Línea horizontal suave
+    doc.setDrawColor(...C.ruleLine);
+    doc.setLineWidth(0.25);
+    doc.line(margin + 6, y + 6.5, pageW - margin, y + 6.5);
+    y += 13;
+    doc.setTextColor(...C.darkGray);
   };
+
+  // ── Función: bloque de texto corrido ──
   const textBlock = (text) => {
     if (!text) return;
-    doc.setFont('helvetica','normal'); doc.setFontSize(9);
-    doc.setTextColor(...colors.dark);
-    doc.splitTextToSize(String(text), contentW).forEach(l => {
-      checkPage(6); doc.text(l, margin, y); y += 5;
-    }); y += 3;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(...C.darkGray);
+    const lines = doc.splitTextToSize(String(text), contentW);
+    lines.forEach(l => { checkPage(6); doc.text(l, margin, y); y += 5.2; });
+    y += 4;
   };
-  // — Identificación —
-  sectionTitle('Identificación de la reunión');
-  const id = acta.identificacion || {};
+
+  // ══════════════════════════════════════════════════════
+  //  PÁGINA 1 — Portada + Identificación
+  // ══════════════════════════════════════════════════════
+  drawHeader(true);
+  y = 32;
+
+  // Bloque de identificación
+  const idData = acta.identificacion || {};
   const startedDate = meeting?.started_at ? new Date(meeting.started_at) : null;
   const endedDate   = meeting?.ended_at   ? new Date(meeting.ended_at)   : null;
+
   const fields = [
-    ['Cliente', id.cliente],
-    ['Proyecto', id.proyecto],
-    ['Responsable', id.responsable],
-    ['Fecha', id.fecha||(startedDate?startedDate.toISOString().split('T')[0]:'')],
-    ['Hora inicio', id.hora_inicio||(startedDate?startedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):'' )],
-    ['Hora fin', id.hora_fin||(endedDate?endedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):'' )],
-    ['Participantes', Array.isArray(id.participantes)?id.participantes.join(', '):id.participantes],
+    ['Cliente',       idData.cliente],
+    ['Proyecto',      idData.proyecto],
+    ['Responsable',   idData.responsable],
+    ['Fecha',         idData.fecha || (startedDate ? startedDate.toISOString().split('T')[0] : '')],
+    ['Hora inicio',   idData.hora_inicio || (startedDate ? startedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}) : '')],
+    ['Hora fin',      idData.hora_fin    || (endedDate   ? endedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'})   : '')],
+    ['Participantes', Array.isArray(idData.participantes) ? idData.participantes.join(', ') : (idData.participantes || '')],
   ];
-  fields.forEach(([lbl, val], i) => {
-    checkPage(7);
-    if (i % 2 === 0) { doc.setFillColor(...colors.light); doc.rect(margin, y-3, contentW, 7, 'F'); }
-    doc.setFont('helvetica','bold'); doc.setFontSize(8.5); doc.setTextColor(...colors.gray);
-    doc.text(lbl.toUpperCase(), margin + 2, y + 1);
-    doc.setFont('helvetica','normal'); doc.setTextColor(...colors.black);
-    doc.text(String(val||'—'), margin + 38, y + 1);
-    y += 7;
+
+  sectionTitle('Identificación de la reunión');
+
+  fields.forEach(([label, valor], i) => {
+    checkPage(8);
+    // Fondo alternado muy sutil
+    if (i % 2 === 0) {
+      doc.setFillColor(...C.lightBg);
+      doc.rect(margin, y - 3.5, contentW, 8, 'F');
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(...C.midGray);
+    doc.text(label.toUpperCase(), margin + 2, y + 1);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(...C.black);
+    const valStr = String(valor || '—');
+    const wrapped = doc.splitTextToSize(valStr, contentW - 44);
+    doc.text(wrapped[0] || '—', margin + 44, y + 1);
+    y += 8;
   });
-  y += 4;
-  const tableOpts = (head, body) => ({
-    margin: { left: margin, right: margin }, startY: y, head, body,
-    styles: { fontSize:8.5, cellPadding:3, textColor:colors.black, lineColor:colors.border, lineWidth:0.15 },
-    headStyles: { fillColor:[30,58,95], textColor:[255,255,255], fontStyle:'bold', fontSize:8.5 },
-    alternateRowStyles: { fillColor: colors.light },
-    didDrawPage: () => { y = doc.lastAutoTable?.finalY + 6 || y; }
-  });
+
+  y += 6;
+
+  // ── Tablas: estilos comunes ──
+  const tableBaseStyle = {
+    margin: { left: margin, right: margin },
+    styles: {
+      fontSize: 8,
+      cellPadding: { top: 3, right: 4, bottom: 3, left: 4 },
+      textColor: C.darkGray,
+      lineColor: C.ruleLine,
+      lineWidth: 0.2,
+      font: 'helvetica',
+    },
+    headStyles: {
+      fillColor: C.black,
+      textColor: C.white,
+      fontStyle: 'bold',
+      fontSize: 8,
+      cellPadding: { top: 4, right: 4, bottom: 4, left: 4 },
+    },
+    alternateRowStyles: { fillColor: C.lightBg },
+    columnStyles: {},
+    tableLineColor: C.ruleLine,
+    tableLineWidth: 0.2,
+  };
+
   // — Tareas anteriores —
   sectionTitle('Tareas anteriores');
   const tareasAnt = acta.tareas_anteriores || [];
-  if (!tareasAnt.length) { doc.setFontSize(9); doc.setTextColor(...colors.gray); doc.text('Sin tareas anteriores.', margin, y); y+=8; }
-  else { autoTable(doc, tableOpts([['ID','Descripción','Responsable','Estado']], tareasAnt.map(t=>[t.id||'',t.descripcion||'',t.responsable||'',t.estado||'']))); y=doc.lastAutoTable.finalY+8; }
-  // — Tareas nuevas —
-  checkPage(20); sectionTitle('Tareas nuevas con fecha de compromiso');
-  const tareasNuevas = acta.tareas_nuevas || [];
-  if (!tareasNuevas.length) { doc.setFontSize(9); doc.setTextColor(...colors.gray); doc.text('Sin tareas nuevas.', margin, y); y+=8; }
-  else { autoTable(doc, tableOpts([['ID','Descripción','Responsable','Fecha compromiso']], tareasNuevas.map(t=>[t.id||'',t.descripcion||'',t.responsable||'',t.fecha_compromiso||'']))); y=doc.lastAutoTable.finalY+8; }
-  // — Resumen —
-  checkPage(20); sectionTitle('Resumen ejecutivo de la reunión');
-  textBlock(acta.resumen_reunion);
-  if (acta.observaciones_generales) { checkPage(20); sectionTitle('Observaciones generales'); textBlock(acta.observaciones_generales); }
-  // — Footer con numeración —
-  const total = doc.internal.getNumberOfPages();
-  for (let i = 1; i <= total; i++) {
-    doc.setPage(i);
-    doc.setFillColor(30, 58, 95); doc.rect(0, pageH-10, pageW, 10, 'F');
-    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(255,255,255);
-    doc.text(`Sistema de Actas · dataella.tech`, margin, pageH-4);
-    doc.text(`Página ${i} de ${total}`, pageW-margin, pageH-4, { align:'right' });
+  if (!tareasAnt.length) {
+    doc.setFont('helvetica', 'italic'); doc.setFontSize(8.5); doc.setTextColor(...C.softGray);
+    doc.text('Sin tareas anteriores registradas.', margin, y); y += 10;
+  } else {
+    autoTable(doc, {
+      ...tableBaseStyle,
+      startY: y,
+      head: [['ID', 'Descripción', 'Responsable', 'Estado']],
+      body: tareasAnt.map(t => [t.id||'', t.descripcion||'', t.responsable||'', (t.estado||'pendiente').toUpperCase()]),
+      columnStyles: { 0:{cellWidth:18}, 2:{cellWidth:38}, 3:{cellWidth:26} },
+    });
+    y = doc.lastAutoTable.finalY + 10;
   }
-  const cf = (id.cliente||'acta').replace(/[^a-z0-9]/gi,'_');
-  const ff = (id.fecha||'sin_fecha').replace(/-/g,'');
+
+  // — Tareas nuevas —
+  checkPage(20);
+  sectionTitle('Tareas nuevas con fecha de compromiso');
+  const tareasNuevas = acta.tareas_nuevas || [];
+  if (!tareasNuevas.length) {
+    doc.setFont('helvetica', 'italic'); doc.setFontSize(8.5); doc.setTextColor(...C.softGray);
+    doc.text('Sin tareas nuevas registradas.', margin, y); y += 10;
+  } else {
+    autoTable(doc, {
+      ...tableBaseStyle,
+      startY: y,
+      head: [['ID', 'Descripción', 'Responsable', 'Fecha compromiso']],
+      body: tareasNuevas.map(t => [t.id||'', t.descripcion||'', t.responsable||'', t.fecha_compromiso||'—']),
+      columnStyles: { 0:{cellWidth:18}, 2:{cellWidth:38}, 3:{cellWidth:32} },
+    });
+    y = doc.lastAutoTable.finalY + 10;
+  }
+
+  // — Resumen ejecutivo —
+  checkPage(24);
+  sectionTitle('Resumen ejecutivo de la reunión');
+  textBlock(acta.resumen_reunion);
+
+  // — Observaciones —
+  if (acta.observaciones_generales) {
+    checkPage(24);
+    sectionTitle('Observaciones generales');
+    textBlock(acta.observaciones_generales);
+  }
+
+  // — Bloque de firma —
+  checkPage(40);
+  y += 8;
+  doc.setDrawColor(...C.ruleLine);
+  doc.setLineWidth(0.3);
+  const col1 = margin;
+  const col2 = margin + contentW / 2 + 8;
+  const lineW = contentW / 2 - 8;
+  doc.line(col1, y, col1 + lineW, y);
+  doc.line(col2, y, col2 + lineW, y);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.5);
+  doc.setTextColor(...C.midGray);
+  doc.text('Elaborado por', col1, y + 5);
+  doc.text('Aprobado por el cliente', col2, y + 5);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(...C.darkGray);
+  doc.text(idData.responsable || '_______________', col1, y + 10);
+  doc.text(idData.cliente     || '_______________', col2, y + 10);
+
+  // ══════════════════════════════════════════════════════
+  //  PIES DE PÁGINA en todas las páginas
+  // ══════════════════════════════════════════════════════
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    drawFooter(i, totalPages);
+  }
+
+  const cf = (idData.cliente||'acta').replace(/[^a-z0-9]/gi,'_');
+  const ff = (idData.fecha||'sin_fecha').replace(/-/g,'');
   doc.save(`Acta_${cf}_${ff}.pdf`);
 }
 
@@ -628,34 +789,47 @@ function MeetingDetail() {
   const renderTareasActa = (tipo, label) => {
     const items = actaDraft?.[tipo]||[];
     const esTipoNueva = tipo==='tareas_nuevas';
+    const estadoBW = (estado) => {
+      const s = estado || 'pendiente';
+      const map = {
+        completada:    { bg:'#f0f0f0', color:'#111', border:'#aaa' },
+        'en progreso': { bg:'#e8e8e8', color:'#333', border:'#999' },
+        cancelada:     { bg:'#fff',    color:'#666', border:'#ccc' },
+        pendiente:     { bg:'#f7f7f7', color:'#555', border:'#ccc' },
+      };
+      const c = map[s] || map.pendiente;
+      return { padding:'2px 9px', borderRadius:2, fontSize:10, fontWeight:600, fontFamily:'helvetica, Arial, sans-serif',
+        backgroundColor:c.bg, color:c.color, border:`1px solid ${c.border}`, display:'inline-block', textTransform:'uppercase', letterSpacing:.5 };
+    };
     return (
-      <div style={{ marginBottom:18 }}>
-        <div style={{ display:'flex', alignItems:'center', marginBottom:8, gap:8 }}>
-          <h4 style={{ margin:0, color:'#333', fontSize:13 }}>{label}</h4>
-          <span style={{ fontSize:11, color:'#999', backgroundColor:'#f0f0f0', borderRadius:10, padding:'1px 8px' }}>{items.length}</span>
+      <div style={{ marginBottom:24 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+          <div style={{ width:3, height:16, backgroundColor:'#000', flexShrink:0 }}></div>
+          <h4 style={{ margin:0, fontFamily:'helvetica, Arial, sans-serif', fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:1.5, color:'#000' }}>{label}</h4>
+          <span style={{ fontSize:10, color:'#888', fontFamily:'helvetica, Arial, sans-serif', backgroundColor:'#efefef', borderRadius:2, padding:'1px 7px', border:'1px solid #ddd' }}>{items.length}</span>
           {editingActa && (
-            <button onClick={()=>agregarTareaActa(tipo)} style={{ marginLeft:'auto', padding:'4px 12px', backgroundColor:'#E8F5E9', color:'#2E7D32', border:'1px solid #A5D6A7', borderRadius:5, cursor:'pointer', fontSize:12, fontWeight:600 }}>➕ Agregar</button>
+            <button onClick={()=>agregarTareaActa(tipo)} style={{ marginLeft:'auto', padding:'4px 12px', backgroundColor:'#fff', color:'#000', border:'1px solid #999', borderRadius:2, cursor:'pointer', fontSize:11, fontWeight:600, fontFamily:'helvetica, Arial, sans-serif' }}>+ Agregar</button>
           )}
         </div>
         {items.length===0 ? (
-          <p style={{ color:'#bbb', fontSize:13, fontStyle:'italic', margin:0 }}>Sin {label.toLowerCase()}</p>
+          <p style={{ fontFamily:'Georgia, serif', color:'#aaa', fontSize:12, fontStyle:'italic', margin:0, padding:'10px 0' }}>Sin {label.toLowerCase()}</p>
         ) : (
-          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+          <div style={{ border:'1px solid #d4d4d4', borderRadius:2, overflow:'hidden' }}>
             {items.map((t,i) => (
-              <div key={i} style={{ padding:'10px 12px', borderRadius:7, border:'1px solid #e8ecf0', backgroundColor:'#fafbfc', display:'flex', alignItems:'flex-start', gap:10 }}>
+              <div key={i} style={{ padding:'11px 14px', borderBottom: i<items.length-1?'1px solid #e8e8e8':'none', backgroundColor: i%2===0?'#fff':'#fafafa', display:'flex', alignItems:'flex-start', gap:12 }}>
                 <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap', marginBottom:3 }}>
-                    <span style={{ fontSize:11, fontWeight:700, color:'#1565C0', backgroundColor:'#E3F2FD', padding:'1px 7px', borderRadius:4 }}>{t.id||`#${i+1}`}</span>
-                    <span style={estadoBadge(t.estado||'pendiente')}>{t.estado||'pendiente'}</span>
-                    {esTipoNueva&&t.fecha_compromiso&&<span style={{ fontSize:11, color:'#777' }}>📅 {t.fecha_compromiso}</span>}
+                  <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap', marginBottom:4 }}>
+                    <span style={{ fontSize:10, fontWeight:700, color:'#111', fontFamily:'helvetica, Arial, sans-serif', backgroundColor:'#efefef', padding:'1px 7px', borderRadius:2, border:'1px solid #ddd' }}>{t.id||`#${i+1}`}</span>
+                    <span style={estadoBW(t.estado||'pendiente')}>{t.estado||'pendiente'}</span>
+                    {esTipoNueva&&t.fecha_compromiso&&<span style={{ fontFamily:'helvetica, Arial, sans-serif', fontSize:10, color:'#666', border:'1px solid #e0e0e0', borderRadius:2, padding:'1px 7px', backgroundColor:'#fafafa' }}>{t.fecha_compromiso}</span>}
                   </div>
-                  <div style={{ fontSize:13, color:'#333', lineHeight:1.4, marginBottom:t.responsable?2:0 }}>{t.descripcion||<em style={{color:'#bbb'}}>Sin descripción</em>}</div>
-                  {t.responsable&&<div style={{ fontSize:12, color:'#666' }}>👤 {t.responsable}</div>}
+                  <div style={{ fontFamily:'Georgia, serif', fontSize:13, color:'#111', lineHeight:1.5, marginBottom:t.responsable?3:0 }}>{t.descripcion||<em style={{color:'#bbb'}}>Sin descripción</em>}</div>
+                  {t.responsable&&<div style={{ fontFamily:'helvetica, Arial, sans-serif', fontSize:11, color:'#666' }}>{t.responsable}</div>}
                 </div>
                 {editingActa&&(
                   <div style={{ display:'flex', gap:4, flexShrink:0 }}>
-                    <button onClick={()=>abrirModalActa(tipo,i)} style={{ width:30, height:30, border:'1px solid #ddd', borderRadius:6, backgroundColor:'white', cursor:'pointer', fontSize:14 }}>✏️</button>
-                    <button onClick={()=>{if(confirm(`¿Eliminar tarea ${t.id||`#${i+1}`}?`))eliminarTareaActa(tipo,i);}} style={{ width:30, height:30, border:'1px solid #ffcdd2', borderRadius:6, backgroundColor:'#fff8f8', cursor:'pointer', fontSize:14, color:'#c62828' }}>🗑️</button>
+                    <button onClick={()=>abrirModalActa(tipo,i)} style={{ padding:'4px 10px', border:'1px solid #ccc', borderRadius:2, backgroundColor:'#fff', cursor:'pointer', fontSize:12, fontFamily:'helvetica, Arial, sans-serif', color:'#333' }}>✏</button>
+                    <button onClick={()=>{if(confirm(`¿Eliminar tarea ${t.id||`#${i+1}`}?`))eliminarTareaActa(tipo,i);}} style={{ padding:'4px 10px', border:'1px solid #ccc', borderRadius:2, backgroundColor:'#fff', cursor:'pointer', fontSize:12, fontFamily:'helvetica, Arial, sans-serif', color:'#888' }}>✕</button>
                   </div>
                 )}
               </div>
@@ -779,7 +953,18 @@ function MeetingDetail() {
                 <button onClick={saveActa} disabled={!actaDirty||savingActa} style={btnStyle('#1565C0',!actaDirty||savingActa)}>
                   {savingActa?'Guardando…':'💾 Guardar'}
                 </button>
-                <button onClick={()=>generarPDF(actaDraft||acta,meeting)} style={btnStyle('#E53935')}>📄 PDF</button>
+                <button onClick={()=>{
+                  const img = new Image();
+                  img.crossOrigin = 'anonymous';
+                  img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.width; canvas.height = img.height;
+                    canvas.getContext('2d').drawImage(img, 0, 0);
+                    generarPDF(actaDraft||acta, meeting, canvas.toDataURL('image/png'));
+                  };
+                  img.onerror = () => generarPDF(actaDraft||acta, meeting, null);
+                  img.src = logoGerenteNegocios;
+                }} style={btnStyle('#1a1a1a')}>📄 Exportar PDF</button>
                 <button onClick={async()=>{if(!confirm('¿Reprocesar acta?'))return;const r=await apiFetch(`/meetings/${id}/reprocess-acta`,{method:'POST'});if(r.ok){alert('Reprocesando...');setTimeout(fetchMeetingData,5000);}}} style={btnStyle('#9C27B0')}>🔄 Reprocesar</button>
               </div>
 
@@ -790,54 +975,103 @@ function MeetingDetail() {
               )}
 
               <div>
-                <div style={{ padding:20, border:'1px solid #e8ecf0', borderRadius:10, backgroundColor:'white' }}>
-                  <h3 style={{ marginBottom:18, color:'#1565C0', borderBottom:'2px solid #E3F2FD', paddingBottom:8 }}>Vista del Acta</h3>
+                <div style={{ padding:28, border:'1px solid #d4d4d4', borderRadius:4, backgroundColor:'white', fontFamily:'Georgia, serif' }}>
 
-                  <div style={{ marginBottom:20, padding:14, backgroundColor:'#f8f9fa', borderRadius:8, border:'1px solid #e9ecef' }}>
-                    <h4 style={{ marginBottom:12, color:'#444', fontSize:13, textTransform:'uppercase', letterSpacing:'.5px' }}>📋 Identificación</h4>
-                    <div style={{ display:'grid', gridTemplateColumns:'110px 1fr', gap:'8px 10px', fontSize:13 }}>
-                      {['cliente','proyecto','fecha','hora_inicio','hora_fin','responsable'].map(k=>{
-                        const val=actaDraft.identificacion?.[k]??'';
-                        return (
-                          <div key={k} style={{ display:'contents' }}>
-                            <div style={{ fontWeight:600, color:'#666', alignSelf:'center' }}>{k.replace('_',' ')}</div>
-                            {editingActa ? (
-                              <input value={val} onChange={e=>{setActaDraft(a=>({...a,identificacion:{...(a.identificacion||{}),[k]:e.target.value}}));setActaDirty(true);}} style={fieldStyle(true)} type={k.includes('hora')?'time':k==='fecha'?'date':'text'} />
-                            ) : <div style={{ color:'#333', padding:'2px 0' }}>{val||'—'}</div>}
-                          </div>
-                        );
-                      })}
-                      <div style={{ fontWeight:600, color:'#666', alignSelf:'center' }}>participantes</div>
-                      {editingActa ? (
-                        <input value={(actaDraft.identificacion?.participantes||[]).join(', ')} onChange={e=>{const arr=e.target.value.split(/[,;]/).map(s=>s.trim()).filter(Boolean);setActaDraft(a=>({...a,identificacion:{...(a.identificacion||{}),participantes:arr}}));setActaDirty(true);}} style={fieldStyle(true)} placeholder="Nombre 1, Nombre 2..." />
-                      ) : <div style={{ color:'#333', padding:'2px 0' }}>{(actaDraft.identificacion?.participantes||[]).join(', ')||'—'}</div>}
+                  {/* Cabecera del acta */}
+                  <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', borderBottom:'2px solid #000', paddingBottom:16, marginBottom:24 }}>
+                    <img src={logoGerenteNegocios} alt="GerentedeNegocios" style={{ height:40, objectFit:'contain' }} />
+                    <div style={{ textAlign:'right' }}>
+                      <div style={{ fontFamily:'helvetica, Arial, sans-serif', fontSize:18, fontWeight:700, color:'#000', letterSpacing:1, textTransform:'uppercase' }}>Acta de Reunión</div>
+                      <div style={{ fontFamily:'helvetica, Arial, sans-serif', fontSize:11, color:'#666', marginTop:3 }}>
+                        {actaDraft.identificacion?.fecha || '—'}
+                      </div>
                     </div>
                   </div>
 
+                  {/* Sección: Identificación */}
+                  <div style={{ marginBottom:28 }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+                      <div style={{ width:3, height:16, backgroundColor:'#000', flexShrink:0 }}></div>
+                      <h4 style={{ margin:0, fontFamily:'helvetica, Arial, sans-serif', fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:1.5, color:'#000' }}>Identificación de la reunión</h4>
+                    </div>
+                    <div style={{ display:'grid', gridTemplateColumns:'130px 1fr', gap:'1px', border:'1px solid #d4d4d4', borderRadius:2 }}>
+                      {['cliente','proyecto','fecha','hora_inicio','hora_fin','responsable'].map((k, i) => {
+                        const val = actaDraft.identificacion?.[k] ?? '';
+                        return (
+                          <div key={k} style={{ display:'contents' }}>
+                            <div style={{ padding:'9px 12px', backgroundColor: i%2===0?'#f7f7f7':'#fafafa', fontFamily:'helvetica, Arial, sans-serif', fontSize:11, fontWeight:600, color:'#555', textTransform:'uppercase', letterSpacing:.5, borderBottom:'1px solid #e8e8e8' }}>
+                              {k.replace('_',' ')}
+                            </div>
+                            <div style={{ padding:'9px 12px', backgroundColor: i%2===0?'#fff':'#fdfdfd', borderBottom:'1px solid #e8e8e8', borderLeft:'1px solid #d4d4d4' }}>
+                              {editingActa ? (
+                                <input value={val} onChange={e=>{setActaDraft(a=>({...a,identificacion:{...(a.identificacion||{}),[k]:e.target.value}}));setActaDirty(true);}} style={{ width:'100%', padding:'4px 6px', border:'1px solid #bbb', borderRadius:2, fontSize:12, boxSizing:'border-box', fontFamily:'helvetica, Arial, sans-serif', outline:'none', backgroundColor:'#fff' }} type={k.includes('hora')?'time':k==='fecha'?'date':'text'} />
+                              ) : (
+                                <span style={{ fontFamily:'Georgia, serif', fontSize:12, color:'#111' }}>{val||'—'}</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {/* Participantes */}
+                      <div style={{ padding:'9px 12px', backgroundColor:'#f7f7f7', fontFamily:'helvetica, Arial, sans-serif', fontSize:11, fontWeight:600, color:'#555', textTransform:'uppercase', letterSpacing:.5 }}>
+                        Participantes
+                      </div>
+                      <div style={{ padding:'9px 12px', backgroundColor:'#fff', borderLeft:'1px solid #d4d4d4' }}>
+                        {editingActa ? (
+                          <input value={(actaDraft.identificacion?.participantes||[]).join(', ')} onChange={e=>{const arr=e.target.value.split(/[,;]/).map(s=>s.trim()).filter(Boolean);setActaDraft(a=>({...a,identificacion:{...(a.identificacion||{}),participantes:arr}}));setActaDirty(true);}} style={{ width:'100%', padding:'4px 6px', border:'1px solid #bbb', borderRadius:2, fontSize:12, boxSizing:'border-box', fontFamily:'helvetica, Arial, sans-serif', outline:'none' }} placeholder="Nombre 1, Nombre 2..." />
+                        ) : (
+                          <span style={{ fontFamily:'Georgia, serif', fontSize:12, color:'#111' }}>{(actaDraft.identificacion?.participantes||[]).join(', ')||'—'}</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Secciones de tareas */}
                   {renderTareasActa('tareas_anteriores','Tareas Anteriores')}
                   {renderTareasActa('tareas_nuevas','Tareas Nuevas')}
 
-                  <div style={{ marginBottom:16 }}>
-                    <h4 style={{ marginBottom:8, color:'#333', fontSize:13 }}>Resumen de la reunión</h4>
+                  {/* Resumen */}
+                  <div style={{ marginBottom:22 }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+                      <div style={{ width:3, height:16, backgroundColor:'#000', flexShrink:0 }}></div>
+                      <h4 style={{ margin:0, fontFamily:'helvetica, Arial, sans-serif', fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:1.5, color:'#000' }}>Resumen de la reunión</h4>
+                    </div>
                     {editingActa ? (
-                      <textarea value={actaDraft.resumen_reunion||''} onChange={e=>{setActaDraft(a=>({...a,resumen_reunion:e.target.value}));setActaDirty(true);}} rows={5} style={{...fieldStyle(true),resize:'vertical',lineHeight:1.6}} />
+                      <textarea value={actaDraft.resumen_reunion||''} onChange={e=>{setActaDraft(a=>({...a,resumen_reunion:e.target.value}));setActaDirty(true);}} rows={5} style={{ width:'100%', padding:'10px 12px', border:'1px solid #bbb', borderRadius:2, fontSize:12, boxSizing:'border-box', resize:'vertical', lineHeight:1.7, fontFamily:'Georgia, serif', outline:'none' }} />
                     ) : (
-                      <p style={{ fontSize:13, lineHeight:1.7, color:'#333', margin:0, padding:'8px 12px', backgroundColor:'#fafafa', borderRadius:6, border:'1px solid #eee' }}>
+                      <p style={{ fontFamily:'Georgia, serif', fontSize:13, lineHeight:1.8, color:'#222', margin:0, padding:'12px 16px', backgroundColor:'#fafafa', border:'1px solid #e8e8e8', borderRadius:2 }}>
                         {actaDraft.resumen_reunion||'—'}
                       </p>
                     )}
                   </div>
 
-                  <div>
-                    <h4 style={{ marginBottom:8, color:'#333', fontSize:13 }}>Observaciones generales</h4>
+                  {/* Observaciones */}
+                  <div style={{ marginBottom:8 }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+                      <div style={{ width:3, height:16, backgroundColor:'#000', flexShrink:0 }}></div>
+                      <h4 style={{ margin:0, fontFamily:'helvetica, Arial, sans-serif', fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:1.5, color:'#000' }}>Observaciones generales</h4>
+                    </div>
                     {editingActa ? (
-                      <textarea value={actaDraft.observaciones_generales||''} onChange={e=>{setActaDraft(a=>({...a,observaciones_generales:e.target.value}));setActaDirty(true);}} rows={3} style={{...fieldStyle(true),resize:'vertical',lineHeight:1.6}} />
+                      <textarea value={actaDraft.observaciones_generales||''} onChange={e=>{setActaDraft(a=>({...a,observaciones_generales:e.target.value}));setActaDirty(true);}} rows={3} style={{ width:'100%', padding:'10px 12px', border:'1px solid #bbb', borderRadius:2, fontSize:12, boxSizing:'border-box', resize:'vertical', lineHeight:1.7, fontFamily:'Georgia, serif', outline:'none' }} />
                     ) : (
-                      <p style={{ fontSize:13, lineHeight:1.7, color:'#333', margin:0, padding:'8px 12px', backgroundColor:'#fafafa', borderRadius:6, border:'1px solid #eee' }}>
+                      <p style={{ fontFamily:'Georgia, serif', fontSize:13, lineHeight:1.8, color:'#222', margin:0, padding:'12px 16px', backgroundColor:'#fafafa', border:'1px solid #e8e8e8', borderRadius:2 }}>
                         {actaDraft.observaciones_generales||'—'}
                       </p>
                     )}
                   </div>
+
+                  {/* Pie del documento */}
+                  <div style={{ marginTop:32, paddingTop:16, borderTop:'1px solid #d4d4d4', display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
+                    <div>
+                      <div style={{ width:120, borderTop:'1px solid #000', paddingTop:6, fontFamily:'helvetica, Arial, sans-serif', fontSize:10, color:'#555' }}>Elaborado por</div>
+                      <div style={{ fontFamily:'Georgia, serif', fontSize:11, color:'#111', marginTop:2 }}>{actaDraft.identificacion?.responsable||'___________'}</div>
+                    </div>
+                    <div style={{ textAlign:'right' }}>
+                      <div style={{ width:120, borderTop:'1px solid #000', paddingTop:6, fontFamily:'helvetica, Arial, sans-serif', fontSize:10, color:'#555', marginLeft:'auto' }}>Aprobado por el cliente</div>
+                      <div style={{ fontFamily:'Georgia, serif', fontSize:11, color:'#111', marginTop:2 }}>{actaDraft.identificacion?.cliente||'___________'}</div>
+                    </div>
+                  </div>
+
                 </div>
               </div>
             </div>
