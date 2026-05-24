@@ -17,6 +17,7 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
 const app = express();
+app.set('trust proxy', 1); // Confiar en Nginx como proxy
 // ── Logging de errores no capturados ─────────────────────────────────────────
 process.on('uncaughtException',  (err) => console.error('[uncaughtException]',  err.message));
 process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err?.message || err));
@@ -314,7 +315,7 @@ const callLLM = async (prompt, model = LLM_MODEL, retries = 3) => {
   for (let i = 0; i <= retries; i++) {
     try {
       const r = await client.chat.completions.create({
-        model:           use,
+        model:           useModel,
         messages:        [{ role: 'user', content: prompt }],
         temperature:     0.1,
         response_format: { type: 'json_object' },
