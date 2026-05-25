@@ -3,7 +3,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import logoGerenteNegocios from '../assets/images/logo_gerentedenegocios.png';
 
 function safeJsonParseArray(s) {
   try { const v = JSON.parse(s); return Array.isArray(v) ? v : []; } catch { return []; }
@@ -21,254 +20,55 @@ const estadoBadge = (estado) => {
     backgroundColor: c.bg, color: c.color, border: `1px solid ${c.border}`, display: 'inline-block' };
 };
 
-// ─── PDF ─────────────────────────────────────────────────────────────────────
-function generarPDF(acta, meeting, logoDataUrl) {
-  const doc    = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-  const pageW  = doc.internal.pageSize.getWidth();
-  const pageH  = doc.internal.pageSize.getHeight();
-  const margin = 22;
-  const contentW = pageW - margin * 2;
-  let y = 0;
-
-  // ── Paleta: blanco/negro con fondo crema elegante ──
-  const CREAM   = [250, 247, 242];
-  const DARK    = [60,  40,  30];
-  const HEADING = [90,  55,  45];
-  const MUTED   = [140, 120, 110];
-  const RULE    = [200, 185, 175];
-  const WHITE   = [255, 255, 255];
-
-  // ── Fondo crema en toda la página ──
-  const fillBackground = () => {
-    doc.setFillColor(...CREAM);
-    doc.rect(0, 0, pageW, pageH, 'F');
-  };
-
-  // ── Marca de agua: logo centrado, muy tenue ──
-  const addWatermark = () => {
-    if (!logoDataUrl) return;
-    doc.saveGraphicsState();
-    doc.setGState(new doc.GState({ opacity: 0.04 }));
-    const s = 100;
-    doc.addImage(logoDataUrl, 'PNG', (pageW - s) / 2, (pageH - s) / 2, s, s);
-    doc.restoreGraphicsState();
-  };
-
-  // ── Línea horizontal decorativa ──
-  const hrule = (yPos, alpha = 1) => {
-    doc.setDrawColor(...RULE);
-    doc.setLineWidth(0.3);
-    doc.line(margin, yPos, pageW - margin, yPos);
-  };
-
-  // ── Salto de página ──
-  const checkPage = (needed = 12) => {
-    if (y + needed > pageH - 20) {
-      doc.addPage();
-      fillBackground();
-      addWatermark();
-      y = margin + 6;
-    }
-  };
-
-  // ── Título de sección al estilo imagen: uppercase pequeño, color terracota, línea abajo ──
+// ─── PDF (mismo que admin) ────────────────────────────────────────────────────
+function generarPDF(acta, meeting) {
+  const doc   = new jsPDF({ orientation:'portrait', unit:'mm', format:'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 20; const contentW = pageW - margin * 2;
+  let y = 20;
+  const colors = { black:[0,0,0], darkGray:[80,80,80], gray:[130,130,130], lightGray:[245,245,245], border:[180,180,180] };
+  const checkPage = (n=10) => { if (y+n > pageH-20) { doc.addPage(); y=20; } };
   const sectionTitle = (text) => {
-    checkPage(18);
-    y += 6;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8);
-    doc.setTextColor(...HEADING);
-    doc.setCharSpace(1.5);
-    doc.text(text.toUpperCase(), margin, y);
-    doc.setCharSpace(0);
-    y += 3;
-    hrule(y);
-    y += 7;
+    checkPage(14); doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(...colors.black);
+    doc.text(text.toUpperCase(), margin, y); y+=2; doc.setDrawColor(...colors.black);
+    doc.line(margin, y, margin+contentW, y); y+=8;
   };
-
-  // ── Bloque de texto corrido ──
-  const textBlock = (text, color = DARK) => {
-    if (!text) return;
-    doc.setFont('times', 'normal');
-    doc.setFontSize(10.5);
-    doc.setTextColor(...color);
-    const lines = doc.splitTextToSize(String(text), contentW);
-    lines.forEach(l => { checkPage(6); doc.text(l, margin, y); y += 5.8; });
-    y += 3;
+  const textBlock = (text) => {
+    if (!text) return; doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...colors.darkGray);
+    doc.splitTextToSize(String(text), contentW).forEach(l => { checkPage(6); doc.text(l, margin, y); y+=5; }); y+=4;
   };
-
-  // ── Fila de campo: etiqueta + valor en misma línea (estilo tabla de la imagen) ──
-  const fieldRow = (label, value, isLast = false) => {
-    checkPage(9);
-    // línea separadora suave
-    doc.setDrawColor(...RULE);
-    doc.setLineWidth(0.2);
-    doc.line(margin, y - 2, pageW - margin, y - 2);
-
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8);
-    doc.setTextColor(...HEADING);
-    doc.setCharSpace(1);
-    doc.text(label.toUpperCase(), margin, y + 3);
-    doc.setCharSpace(0);
-
-    doc.setFont('times', 'normal');
-    doc.setFontSize(10.5);
-    doc.setTextColor(...DARK);
-    const valStr = String(value || '');
-    const wrapped = doc.splitTextToSize(valStr, contentW - 52);
-    doc.text(wrapped[0] || '', margin + 52, y + 3);
-    y += 9;
-    if (isLast) {
-      doc.setDrawColor(...RULE);
-      doc.setLineWidth(0.2);
-      doc.line(margin, y - 2, pageW - margin, y - 2);
-    }
-  };
-
-  // ── Lista de ítems (tareas) sin tabla ──
-  const bulletItem = (t, showFecha = false) => {
-    checkPage(14);
-    // bullet point
-    doc.setFillColor(...HEADING);
-    doc.circle(margin + 2, y + 1.5, 1, 'F');
-
-    doc.setFont('times', 'normal');
-    doc.setFontSize(10.5);
-    doc.setTextColor(...DARK);
-    const desc = String(t.descripcion || '');
-    const lines = doc.splitTextToSize(desc, contentW - 10);
-    lines.forEach((l, li) => {
-      checkPage(6);
-      doc.text(l, margin + 7, y + (li === 0 ? 0 : 5.5 * li));
-    });
-    y += 5.5 * lines.length;
-
-    // meta: responsable · fecha · estado
-    const meta = [
-      t.responsable ? t.responsable : null,
-      showFecha && t.fecha_compromiso ? t.fecha_compromiso : null,
-      t.estado && t.estado !== 'pendiente' ? t.estado.toUpperCase() : null,
-    ].filter(Boolean).join('  ·  ');
-
-    if (meta) {
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
-      doc.setTextColor(...MUTED);
-      doc.text(meta, margin + 7, y);
-      y += 5;
-    }
-    y += 3;
-  };
-
-  // ══════════════════════════════════════════════════════════
-  //  PÁGINA 1
-  // ══════════════════════════════════════════════════════════
-  fillBackground();
-  addWatermark();
-
-  // ── Logo (500×500 cuadrado, lo colocamos grande arriba a la izquierda) ──
-  const logoSize = 38;
-  if (logoDataUrl) {
-    doc.addImage(logoDataUrl, 'PNG', margin, 14, logoSize, logoSize);
-  }
-
-  // ── Título principal estilo imagen (serif grande) ──
-  doc.setFont('times', 'italic');
-  doc.setFontSize(36);
-  doc.setTextColor(...HEADING);
-  doc.text('Actas', margin + (logoDataUrl ? logoSize + 8 : 0), 38);
-
-  // ── Subtítulo: tipo de reunión ──
-  const idData = acta.identificacion || {};
+  doc.setFont('helvetica','bold'); doc.setFontSize(14); doc.setTextColor(...colors.black);
+  doc.text('ACTA DE REUNIÓN', pageW/2, y, {align:'center'}); y+=10;
+  doc.setFontSize(9); doc.setFont('helvetica','normal');
+  doc.text(`Generado el ${new Date().toLocaleDateString('es-ES')}`, pageW/2, y, {align:'center'}); y+=12;
+  sectionTitle('Identificación');
+  const id = acta.identificacion || {};
   const startedDate = meeting?.started_at ? new Date(meeting.started_at) : null;
   const endedDate   = meeting?.ended_at   ? new Date(meeting.ended_at)   : null;
-  const subtitulo   = idData.proyecto || 'Reunión de trabajo';
-  doc.setFont('times', 'normal');
-  doc.setFontSize(12);
-  doc.setTextColor(...MUTED);
-  doc.text(subtitulo, margin + (logoDataUrl ? logoSize + 8 : 0), 47);
-
-  y = 60;
-  hrule(y); y += 10;
-
-  // ── Identificación: filas estilo imagen ──
-  const fields = [
-    ['Fecha',            idData.fecha || (startedDate ? startedDate.toLocaleDateString('es-ES',{day:'2-digit',month:'long',year:'numeric'}) : '')],
-    ['Hora',             [idData.hora_inicio || (startedDate ? startedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}) : ''),
-                          idData.hora_fin    || (endedDate   ? endedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'})   : '')].filter(Boolean).join(' – ')],
-    ['Reunión convocada por', idData.responsable],
-  ];
-  fields.forEach((f, i) => fieldRow(f[0], f[1], i === fields.length - 1));
-  y += 6;
-
-  // ── Asistentes ──
-  if (idData.participantes?.length) {
-    sectionTitle('Asistentes');
-    const lista = Array.isArray(idData.participantes) ? idData.participantes.join(', ') : String(idData.participantes);
-    doc.setFont('times', 'normal');
-    doc.setFontSize(10.5);
-    doc.setTextColor(...DARK);
-    const lines = doc.splitTextToSize(lista, contentW);
-    lines.forEach(l => { checkPage(6); doc.text(l, margin, y); y += 5.8; });
-    y += 4;
+  [['Cliente',id.cliente],['Proyecto',id.proyecto],['Responsable',id.responsable],
+   ['Fecha', id.fecha||(startedDate?startedDate.toISOString().split('T')[0]:'')],
+   ['Hora inicio', id.hora_inicio||(startedDate?startedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):'')],
+   ['Hora fin', id.hora_fin||(endedDate?endedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):''  )],
+   ['Participantes', Array.isArray(id.participantes)?id.participantes.join(', '):id.participantes]
+  ].forEach(([label,value]) => {
+    checkPage(6); doc.setFont('helvetica','bold'); doc.text(label+':', margin, y);
+    doc.setFont('helvetica','normal'); doc.text(String(value||'—'), margin+40, y); y+=6;
+  }); y+=6;
+  const tableOpts = (head,body) => ({ margin:{left:margin,right:margin}, head, body, styles:{fontSize:8.5,cellPadding:3,textColor:colors.black,lineColor:colors.border,lineWidth:0.1}, headStyles:{fillColor:colors.lightGray,textColor:colors.black,fontStyle:'bold'} });
+  sectionTitle('Tareas Nuevas');
+  const tareasNuevas = acta.tareas_nuevas||[];
+  if (!tareasNuevas.length) { doc.setFontSize(9); doc.setTextColor(...colors.gray); doc.text('Sin tareas nuevas.', margin, y); y+=8; }
+  else { autoTable(doc,{startY:y,...tableOpts([['ID','Descripción','Responsable','Fecha compromiso']], tareasNuevas.map(t=>[t.id||'',t.descripcion||'',t.responsable||'',t.fecha_compromiso||'']))}); y=doc.lastAutoTable.finalY+8; }
+  sectionTitle('Resumen'); textBlock(acta.resumen_reunion);
+  if (acta.observaciones_generales) { sectionTitle('Observaciones'); textBlock(acta.observaciones_generales); }
+  for (let i=1; i<=doc.internal.getNumberOfPages(); i++) {
+    doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(...colors.gray);
+    doc.text(`Página ${i} de ${doc.internal.getNumberOfPages()}`, pageW-margin, pageH-10, {align:'right'});
+    doc.text('Generado automáticamente', margin, pageH-10);
   }
-
-  // ── Tareas anteriores ──
-  const tareasAnt = acta.tareas_anteriores || [];
-  if (tareasAnt.length) {
-    sectionTitle('Seguimiento de tareas anteriores');
-    tareasAnt.forEach(t => bulletItem(t, false));
-  }
-
-  // ── Resumen de la reunión ──
-  if (acta.resumen_reunion) {
-    sectionTitle('Resumen de la reunión');
-    textBlock(acta.resumen_reunion);
-  }
-
-  // ── Tareas nuevas ──
-  const tareasNuevas = acta.tareas_nuevas || [];
-  if (tareasNuevas.length) {
-    sectionTitle('Tareas con fecha de compromiso');
-    tareasNuevas.forEach(t => bulletItem(t, true));
-  }
-
-  // ── Observaciones ──
-  if (acta.observaciones_generales) {
-    sectionTitle('Observaciones generales');
-    textBlock(acta.observaciones_generales);
-  }
-
-  // ── Próxima reunión / pie ──
-  checkPage(30);
-  y += 8;
-  hrule(y); y += 10;
-
-  // Bloque de firmas
-  const col1 = margin; const col2 = margin + contentW / 2 + 10;
-  const lw   = contentW / 2 - 10;
-  doc.setDrawColor(...MUTED); doc.setLineWidth(0.3);
-  doc.line(col1, y, col1 + lw, y);
-  doc.line(col2, y, col2 + lw, y);
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...MUTED);
-  doc.text('Elaborado por', col1, y + 5);
-  doc.text('Aprobado por el cliente', col2, y + 5);
-  doc.setFont('times', 'italic'); doc.setFontSize(10); doc.setTextColor(...DARK);
-  doc.text(idData.responsable || '_______________', col1, y + 11);
-  doc.text(idData.cliente     || '_______________', col2, y + 11);
-
-  // ── Pie de página en todas las páginas ──
-  const totalPages = doc.internal.getNumberOfPages();
-  for (let i = 1; i <= totalPages; i++) {
-    doc.setPage(i);
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
-    doc.text('GerentedeNegocios · Sistema de Actas', margin, pageH - 8);
-    doc.text(`${i} / ${totalPages}`, pageW - margin, pageH - 8, { align: 'right' });
-  }
-
-  const cf = (idData.cliente||'acta').replace(/[^a-z0-9]/gi,'_');
-  const ff = (idData.fecha||'sin_fecha').replace(/-/g,'');
+  const cf = (id.cliente||'acta').replace(/[^a-z0-9]/gi,'_');
+  const ff = (id.fecha||'sin_fecha').replace(/-/g,'');
   doc.save(`Acta_${cf}_${ff}.pdf`);
 }
 
@@ -926,18 +726,7 @@ function MeetingDetail() {
                 <button onClick={saveActa} disabled={!actaDirty||savingActa} style={btnStyle('#1565C0',!actaDirty||savingActa)}>
                   {savingActa?'Guardando…':'💾 Guardar'}
                 </button>
-                <button onClick={()=>{
-                  const img = new Image();
-                  img.crossOrigin = 'anonymous';
-                  img.onload = () => {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = img.width; canvas.height = img.height;
-                    canvas.getContext('2d').drawImage(img, 0, 0);
-                    generarPDF(actaDraft||acta, meeting, canvas.toDataURL('image/png'));
-                  };
-                  img.onerror = () => generarPDF(actaDraft||acta, meeting, null);
-                  img.src = logoGerenteNegocios;
-                }} style={btnStyle('#1a1a1a')}>📄 Exportar PDF</button>
+                <button onClick={()=>generarPDF(actaDraft||acta,meeting)} style={btnStyle('#E53935')}>📄 PDF</button>
                 <button onClick={async()=>{if(!confirm('¿Reprocesar acta?'))return;const r=await apiFetch(`/meetings/${id}/reprocess-acta`,{method:'POST'});if(r.ok){alert('Reprocesando...');setTimeout(fetchMeetingData,5000);}}} style={btnStyle('#9C27B0')}>🔄 Reprocesar</button>
               </div>
 
