@@ -9,183 +9,140 @@ function generarPDF(acta, meeting, logoDataUrl) {
   const doc    = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageW  = doc.internal.pageSize.getWidth();
   const pageH  = doc.internal.pageSize.getHeight();
-  const margin = 20;
+  const margin = 22;
   const contentW = pageW - margin * 2;
   let y = 0;
 
-  const C = {
-    black:   [0, 0, 0],
-    darkGray:[40, 40, 40],
-    midGray: [100, 100, 100],
-    softGray:[160, 160, 160],
-    lightBg: [245, 245, 245],
-    white:   [255, 255, 255],
-    ruleLine:[200, 200, 200],
+  const CREAM   = [250, 247, 242];
+  const DARK    = [60,  40,  30];
+  const HEADING = [90,  55,  45];
+  const MUTED   = [140, 120, 110];
+  const RULE    = [200, 185, 175];
+
+  const fillBackground = () => {
+    doc.setFillColor(...CREAM);
+    doc.rect(0, 0, pageW, pageH, 'F');
   };
 
   const addWatermark = () => {
     if (!logoDataUrl) return;
     doc.saveGraphicsState();
-    doc.setGState(new doc.GState({ opacity: 0.05 }));
-    const wmW = 120; const wmH = 60;
-    doc.addImage(logoDataUrl, 'PNG', (pageW - wmW) / 2, (pageH - wmH) / 2, wmW, wmH);
+    doc.setGState(new doc.GState({ opacity: 0.04 }));
+    const s = 100;
+    doc.addImage(logoDataUrl, 'PNG', (pageW - s) / 2, (pageH - s) / 2, s, s);
     doc.restoreGraphicsState();
   };
 
-  const drawHeader = (isFirstPage) => {
-    doc.setFillColor(...C.black);
-    doc.rect(0, 0, pageW, 22, 'F');
-    if (isFirstPage && logoDataUrl) {
-      doc.addImage(logoDataUrl, 'PNG', margin, 3, 36, 16);
-    } else {
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(...C.white);
-      doc.text('GERENTE DE NEGOCIOS', margin, 13);
-    }
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(isFirstPage ? 11 : 8.5);
-    doc.setTextColor(...C.white);
-    doc.text('ACTA DE REUNIÓN', pageW - margin, isFirstPage ? 10 : 11, { align: 'right' });
-    if (isFirstPage) {
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(7.5);
-      doc.setTextColor(...C.softGray);
-      doc.text(`Generado: ${new Date().toLocaleDateString('es-ES', { day:'2-digit', month:'long', year:'numeric' })}`, pageW - margin, 17, { align: 'right' });
-    }
-    addWatermark();
-  };
-
-  const drawFooter = (pageNum, total) => {
-    doc.setDrawColor(...C.ruleLine);
-    doc.setLineWidth(0.3);
-    doc.line(margin, pageH - 12, pageW - margin, pageH - 12);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7);
-    doc.setTextColor(...C.softGray);
-    doc.text('GerentedeNegocios · Sistema de Actas', margin, pageH - 7);
-    doc.text(`Página ${pageNum} de ${total}`, pageW - margin, pageH - 7, { align: 'right' });
+  const hrule = (yPos) => {
+    doc.setDrawColor(...RULE); doc.setLineWidth(0.3);
+    doc.line(margin, yPos, pageW - margin, yPos);
   };
 
   const checkPage = (needed = 12) => {
-    if (y + needed > pageH - 18) {
-      doc.addPage();
-      drawHeader(false);
-      y = 30;
+    if (y + needed > pageH - 20) {
+      doc.addPage(); fillBackground(); addWatermark();
+      y = margin + 6;
     }
   };
 
   const sectionTitle = (text) => {
-    checkPage(16);
-    y += 4;
-    doc.setFillColor(...C.black);
-    doc.rect(margin, y, 3, 6, 'F');
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8.5);
-    doc.setTextColor(...C.black);
-    doc.text(text.toUpperCase(), margin + 6, y + 4.5);
-    doc.setDrawColor(...C.ruleLine);
-    doc.setLineWidth(0.25);
-    doc.line(margin + 6, y + 6.5, pageW - margin, y + 6.5);
-    y += 13;
-    doc.setTextColor(...C.darkGray);
+    checkPage(18); y += 6;
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8);
+    doc.setTextColor(...HEADING); doc.setCharSpace(1.5);
+    doc.text(text.toUpperCase(), margin, y);
+    doc.setCharSpace(0); y += 3; hrule(y); y += 7;
   };
 
   const textBlock = (text) => {
     if (!text) return;
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9);
-    doc.setTextColor(...C.darkGray);
+    doc.setFont('times', 'normal'); doc.setFontSize(10.5); doc.setTextColor(...DARK);
     const lines = doc.splitTextToSize(String(text), contentW);
-    lines.forEach(l => { checkPage(6); doc.text(l, margin, y); y += 5.2; });
-    y += 4;
+    lines.forEach(l => { checkPage(6); doc.text(l, margin, y); y += 5.8; }); y += 3;
   };
 
-  drawHeader(true);
-  y = 32;
+  const fieldRow = (label, value) => {
+    checkPage(9);
+    doc.setDrawColor(...RULE); doc.setLineWidth(0.2);
+    doc.line(margin, y - 2, pageW - margin, y - 2);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8);
+    doc.setTextColor(...HEADING); doc.setCharSpace(1);
+    doc.text(label.toUpperCase(), margin, y + 3); doc.setCharSpace(0);
+    doc.setFont('times', 'normal'); doc.setFontSize(10.5); doc.setTextColor(...DARK);
+    const wrapped = doc.splitTextToSize(String(value || ''), contentW - 52);
+    doc.text(wrapped[0] || '', margin + 52, y + 3); y += 9;
+  };
+
+  const bulletItem = (t, showFecha = false) => {
+    checkPage(14);
+    doc.setFillColor(...HEADING); doc.circle(margin + 2, y + 1.5, 1, 'F');
+    doc.setFont('times', 'normal'); doc.setFontSize(10.5); doc.setTextColor(...DARK);
+    const lines = doc.splitTextToSize(String(t.descripcion || ''), contentW - 10);
+    lines.forEach((l, li) => { checkPage(6); doc.text(l, margin + 7, y + (li === 0 ? 0 : 5.5 * li)); });
+    y += 5.5 * lines.length;
+    const meta = [t.responsable||null, showFecha&&t.fecha_compromiso?t.fecha_compromiso:null, t.estado&&t.estado!=='pendiente'?t.estado.toUpperCase():null].filter(Boolean).join('  ·  ');
+    if (meta) { doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...MUTED); doc.text(meta, margin+7, y); y += 5; }
+    y += 3;
+  };
+
+  // — Página 1 —
+  fillBackground(); addWatermark();
+  const logoSize = 38;
+  if (logoDataUrl) doc.addImage(logoDataUrl, 'PNG', margin, 14, logoSize, logoSize);
+
+  doc.setFont('times','italic'); doc.setFontSize(36); doc.setTextColor(...HEADING);
+  doc.text('Actas', margin + (logoDataUrl ? logoSize + 8 : 0), 38);
 
   const idData = acta.identificacion || {};
   const startedDate = meeting?.started_at ? new Date(meeting.started_at) : null;
   const endedDate   = meeting?.ended_at   ? new Date(meeting.ended_at)   : null;
+  const subtitulo   = idData.proyecto || 'Reunión de trabajo';
+  doc.setFont('times','normal'); doc.setFontSize(12); doc.setTextColor(...MUTED);
+  doc.text(subtitulo, margin + (logoDataUrl ? logoSize + 8 : 0), 47);
 
-  const fields = [
-    ['Cliente',       idData.cliente],
-    ['Proyecto',      idData.proyecto],
-    ['Responsable',   idData.responsable],
-    ['Fecha',         idData.fecha || (startedDate ? startedDate.toISOString().split('T')[0] : '')],
-    ['Hora inicio',   idData.hora_inicio || (startedDate ? startedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}) : '')],
-    ['Hora fin',      idData.hora_fin    || (endedDate   ? endedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'})   : '')],
-    ['Participantes', Array.isArray(idData.participantes) ? idData.participantes.join(', ') : (idData.participantes || '')],
-  ];
+  y = 60; hrule(y); y += 10;
 
-  sectionTitle('Identificación de la reunión');
-  fields.forEach(([label, valor], i) => {
-    checkPage(8);
-    if (i % 2 === 0) { doc.setFillColor(...C.lightBg); doc.rect(margin, y - 3.5, contentW, 8, 'F'); }
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...C.midGray);
-    doc.text(label.toUpperCase(), margin + 2, y + 1);
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...C.black);
-    const wrapped = doc.splitTextToSize(String(valor || '—'), contentW - 44);
-    doc.text(wrapped[0] || '—', margin + 44, y + 1);
-    y += 8;
-  });
+  [
+    ['Fecha',               idData.fecha || (startedDate ? startedDate.toLocaleDateString('es-ES',{day:'2-digit',month:'long',year:'numeric'}) : '')],
+    ['Hora',                [idData.hora_inicio||(startedDate?startedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):''), idData.hora_fin||(endedDate?endedDate.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):'' )].filter(Boolean).join(' – ')],
+    ['Reunión convocada por', idData.responsable],
+  ].forEach(([l,v]) => fieldRow(l,v));
+  doc.setDrawColor(...RULE); doc.setLineWidth(0.2); doc.line(margin, y - 2, pageW - margin, y - 2);
   y += 6;
 
-  const tableBaseStyle = {
-    margin: { left: margin, right: margin },
-    styles: { fontSize:8, cellPadding:{top:3,right:4,bottom:3,left:4}, textColor:C.darkGray, lineColor:C.ruleLine, lineWidth:0.2, font:'helvetica' },
-    headStyles: { fillColor:C.black, textColor:C.white, fontStyle:'bold', fontSize:8, cellPadding:{top:4,right:4,bottom:4,left:4} },
-    alternateRowStyles: { fillColor: C.lightBg },
-    tableLineColor: C.ruleLine,
-    tableLineWidth: 0.2,
-  };
+  if (idData.participantes?.length) {
+    sectionTitle('Asistentes');
+    const lista = Array.isArray(idData.participantes) ? idData.participantes.join(', ') : String(idData.participantes);
+    doc.setFont('times','normal'); doc.setFontSize(10.5); doc.setTextColor(...DARK);
+    doc.splitTextToSize(lista, contentW).forEach(l => { checkPage(6); doc.text(l, margin, y); y += 5.8; }); y += 4;
+  }
 
-  sectionTitle('Tareas anteriores');
   const tareasAnt = acta.tareas_anteriores || [];
-  if (!tareasAnt.length) {
-    doc.setFont('helvetica','italic'); doc.setFontSize(8.5); doc.setTextColor(...C.softGray);
-    doc.text('Sin tareas anteriores registradas.', margin, y); y += 10;
-  } else {
-    autoTable(doc, { ...tableBaseStyle, startY:y, head:[['ID','Descripción','Responsable','Estado']], body:tareasAnt.map(t=>[t.id||'',t.descripcion||'',t.responsable||'',(t.estado||'pendiente').toUpperCase()]), columnStyles:{0:{cellWidth:18},2:{cellWidth:38},3:{cellWidth:26}} });
-    y = doc.lastAutoTable.finalY + 10;
-  }
+  if (tareasAnt.length) { sectionTitle('Seguimiento de tareas anteriores'); tareasAnt.forEach(t => bulletItem(t, false)); }
 
-  checkPage(20);
-  sectionTitle('Tareas nuevas con fecha de compromiso');
+  if (acta.resumen_reunion) { sectionTitle('Resumen de la reunión'); textBlock(acta.resumen_reunion); }
+
   const tareasNuevas = acta.tareas_nuevas || [];
-  if (!tareasNuevas.length) {
-    doc.setFont('helvetica','italic'); doc.setFontSize(8.5); doc.setTextColor(...C.softGray);
-    doc.text('Sin tareas nuevas registradas.', margin, y); y += 10;
-  } else {
-    autoTable(doc, { ...tableBaseStyle, startY:y, head:[['ID','Descripción','Responsable','Fecha compromiso']], body:tareasNuevas.map(t=>[t.id||'',t.descripcion||'',t.responsable||'',t.fecha_compromiso||'—']), columnStyles:{0:{cellWidth:18},2:{cellWidth:38},3:{cellWidth:32}} });
-    y = doc.lastAutoTable.finalY + 10;
-  }
+  if (tareasNuevas.length) { sectionTitle('Tareas con fecha de compromiso'); tareasNuevas.forEach(t => bulletItem(t, true)); }
 
-  checkPage(24);
-  sectionTitle('Resumen ejecutivo de la reunión');
-  textBlock(acta.resumen_reunion);
+  if (acta.observaciones_generales) { sectionTitle('Observaciones generales'); textBlock(acta.observaciones_generales); }
 
-  if (acta.observaciones_generales) {
-    checkPage(24);
-    sectionTitle('Observaciones generales');
-    textBlock(acta.observaciones_generales);
-  }
-
-  checkPage(40);
-  y += 8;
-  doc.setDrawColor(...C.ruleLine); doc.setLineWidth(0.3);
-  const col1 = margin; const col2 = margin + contentW / 2 + 8; const lineW = contentW / 2 - 8;
-  doc.line(col1, y, col1 + lineW, y);
-  doc.line(col2, y, col2 + lineW, y);
-  doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...C.midGray);
-  doc.text('Elaborado por', col1, y + 5);
-  doc.text('Aprobado por el cliente', col2, y + 5);
-  doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...C.darkGray);
-  doc.text(idData.responsable || '_______________', col1, y + 10);
-  doc.text(idData.cliente     || '_______________', col2, y + 10);
+  checkPage(30); y += 8; hrule(y); y += 10;
+  const col1 = margin; const col2 = margin + contentW / 2 + 10; const lw = contentW / 2 - 10;
+  doc.setDrawColor(...MUTED); doc.setLineWidth(0.3);
+  doc.line(col1, y, col1 + lw, y); doc.line(col2, y, col2 + lw, y);
+  doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...MUTED);
+  doc.text('Elaborado por', col1, y + 5); doc.text('Aprobado por el cliente', col2, y + 5);
+  doc.setFont('times','italic'); doc.setFontSize(10); doc.setTextColor(...DARK);
+  doc.text(idData.responsable||'_______________', col1, y + 11);
+  doc.text(idData.cliente    ||'_______________', col2, y + 11);
 
   const totalPages = doc.internal.getNumberOfPages();
-  for (let i = 1; i <= totalPages; i++) { doc.setPage(i); drawFooter(i, totalPages); }
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
+    doc.text('GerentedeNegocios · Sistema de Actas', margin, pageH - 8);
+    doc.text(`${i} / ${totalPages}`, pageW - margin, pageH - 8, { align:'right' });
+  }
 
   const cf = (idData.cliente||'acta').replace(/[^a-z0-9]/gi,'_');
   const ff = (idData.fecha||'sin_fecha').replace(/-/g,'');
