@@ -256,6 +256,13 @@ export function RecordingProvider({ children }) {
     }
   }, [form, createAndStartRecorder, rotateChunk, startProgressPolling]);
 
+  const resetMeetingForm = useCallback(() => {
+    setForm({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'' });
+    setMeetingId(null);
+    setStatus('idle');
+    setRecording(false);
+  }, []);
+
   const stopMeeting = useCallback(async () => {
     clearIntervals();
     if (mediaRecorderRef.current?.state === 'recording') {
