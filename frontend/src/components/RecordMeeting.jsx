@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useRecording } from '../context/RecordingContext';
+import { useRecording,
+} from '../context/RecordingContext';
 import { apiFetch } from '../utils/api';
 
 const fmt = (s) => `${String(Math.floor(s/3600)).padStart(2,'0')}:${String(Math.floor((s%3600)/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
@@ -55,11 +56,11 @@ export default function RecordMeeting() {
   const navigate = useNavigate();
   const {
     isRecording, form, setForm, duration, chunkNumber, progress,
-    statusMsg, errorMsg, setErrorMsg, audioSource, startMeeting, stopMeeting
+    statusMsg, errorMsg, setErrorMsg, audioSource, startMeeting, stopMeeting, resetMeetingForm
   } = useRecording();
 
   const handleStart = async () => { setErrorMsg(''); await startMeeting(); };
-  const handleStop  = async () => { const mid = await stopMeeting(); if (mid) navigate('/meetings'); };
+  const handleStop  = async () => { const mid = await stopMeeting(); if (mid) { resetMeetingForm(); navigate('/meetings'); } };
 
   const seccPct = ((chunkNumber % 12) / 12) * 100;
   const seccNum = Math.floor(chunkNumber / 12);
