@@ -91,46 +91,116 @@ function syncActaToTareas(tareasDraft, actaDraft) {
 }
 
 // ─── Modal edición de tarea ───────────────────────────────────────────────────
-function ModalEditarTarea({ tarea, onSave, onClose, mostrarFecha = true }) {
+function ModalEditarTarea({ tarea, onSave, onClose, companyUsers = [], mostrarFecha = true }) {
   const [form, setForm] = useState({ ...tarea });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const labelStyle = { display:'block', marginBottom:4, fontSize:12, fontWeight:600, color:'#555' };
-  const inputStyle = { width:'100%', padding:'9px 12px', border:'1px solid #dde1e7', borderRadius:6, fontSize:14, boxSizing:'border-box', outline:'none', backgroundColor:'#fff' };
+  const lbl = { display:'block', marginBottom:4, fontSize:12, fontWeight:600, color:'#555' };
+  const inp = { width:'100%', padding:'9px 12px', border:'1px solid #dde1e7', borderRadius:6, fontSize:13, boxSizing:'border-box', backgroundColor:'#fff' };
+  const ESTADOS = [{v:1,l:'Sin iniciar'},{v:2,l:'En progreso'},{v:3,l:'En revisión'},{v:4,l:'Finalizada'},{v:5,l:'Planeación'},{v:7,l:'Respuesta Cliente'},{v:8,l:'Pend otros procesos'}];
+  const PRIORIDADES = [{v:1,l:'🟢 Baja'},{v:2,l:'🟡 Media'},{v:3,l:'🔴 Alta'}];
   return (
-    <div style={{ position:'fixed', inset:0, backgroundColor:'rgba(0,0,0,0.45)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={{ backgroundColor:'white', borderRadius:12, width:'100%', maxWidth:520, boxShadow:'0 20px 60px rgba(0,0,0,0.25)', overflow:'hidden' }}>
-        <div style={{ padding:'18px 24px', borderBottom:'1px solid #eee', display:'flex', justifyContent:'space-between', alignItems:'center', backgroundColor:'#1565C0' }}>
+    <div style={{ position:'fixed',inset:0,backgroundColor:'rgba(0,0,0,0.5)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:16,overflowY:'auto' }}
+      onClick={e => { if (e.target===e.currentTarget) onClose(); }}>
+      <div style={{ backgroundColor:'white',borderRadius:12,width:'100%',maxWidth:580,boxShadow:'0 20px 60px rgba(0,0,0,0.25)',overflow:'hidden',maxHeight:'90vh',display:'flex',flexDirection:'column' }}>
+        <div style={{ padding:'16px 24px',borderBottom:'1px solid #eee',backgroundColor:'#1565C0',display:'flex',justifyContent:'space-between',alignItems:'center',flexShrink:0 }}>
           <div>
-            <div style={{ fontSize:11, color:'rgba(255,255,255,0.7)', fontWeight:500, marginBottom:2 }}>Editando tarea</div>
-            <div style={{ fontSize:15, fontWeight:700, color:'white' }}>{form.id || form.tarea_id || 'Sin ID'}</div>
+            <div style={{ fontSize:11,color:'rgba(255,255,255,0.7)',fontWeight:500 }}>Editando tarea</div>
+            <div style={{ fontSize:15,fontWeight:700,color:'white' }}>{form.tarea_id||form.id||'Nueva'}</div>
           </div>
-          <button onClick={onClose} style={{ background:'rgba(255,255,255,0.15)', border:'none', borderRadius:6, color:'white', fontSize:18, width:32, height:32, cursor:'pointer' }}>×</button>
+          <button onClick={onClose} style={{ background:'rgba(255,255,255,0.15)',border:'none',borderRadius:6,color:'white',fontSize:18,width:32,height:32,cursor:'pointer' }}>×</button>
         </div>
-        <div style={{ padding:24, display:'flex', flexDirection:'column', gap:16 }}>
-          {tarea.id !== undefined && (
-            <div><label style={labelStyle}>ID de tarea</label><input value={form.id||''} onChange={e=>set('id',e.target.value)} style={inputStyle} /></div>
-          )}
+        <div style={{ padding:20,overflowY:'auto',display:'flex',flexDirection:'column',gap:14 }}>
+          {/* Asunto */}
           <div>
-            <label style={labelStyle}>Descripción</label>
-            <textarea value={form.descripcion||''} onChange={e=>set('descripcion',e.target.value)} rows={4} style={{...inputStyle, resize:'vertical', lineHeight:1.5}} placeholder="Describe la tarea..." />
+            <label style={lbl}>Asunto <span style={{color:'#c62828'}}>*</span></label>
+            <input value={form.asunto||''} onChange={e=>set('asunto',e.target.value)} style={inp} placeholder="Título corto de la tarea..." maxLength={100} />
           </div>
+          {/* Descripción */}
           <div>
-            <div><label style={labelStyle}>Responsable</label><input value={form.responsable||''} onChange={e=>set('responsable',e.target.value)} style={inputStyle} /></div>
+            <label style={lbl}>Descripción</label>
+            <textarea value={form.descripcion||''} onChange={e=>set('descripcion',e.target.value)} rows={3} style={{...inp,resize:'vertical'}} placeholder="Descripción de la tarea..." />
+          </div>
+          {/* Detalle */}
+          <div>
+            <label style={lbl}>Detalle / Contexto</label>
+            <textarea value={form.detalle||''} onChange={e=>set('detalle',e.target.value)} rows={3} style={{...inp,resize:'vertical'}} placeholder="Contexto adicional, detalles técnicos, comentarios..." />
+          </div>
+          {/* Fila: Responsable + Asignado a */}
+          <div style={{ display:'grid',gridTemplateColumns:'1fr 1fr',gap:12 }}>
             <div>
-              <label style={labelStyle}>Estado</label>
-              <select value={form.estado||'pendiente'} onChange={e=>set('estado',e.target.value)} style={{...inputStyle, cursor:'pointer'}}>
-                {['pendiente','en progreso','completada','cancelada'].map(s=><option key={s} value={s}>{s}</option>)}
+              <label style={lbl}>Responsable</label>
+              {companyUsers.length > 0 ? (
+                <select value={form.responsable||''} onChange={e=>set('responsable',e.target.value)} style={{...inp,cursor:'pointer'}}>
+                  <option value=''>— Sin asignar —</option>
+                  {companyUsers.map(u=><option key={u.id} value={u.email}>{u.name}</option>)}
+                </select>
+              ) : (
+                <input value={form.responsable||''} onChange={e=>set('responsable',e.target.value)} style={inp} placeholder="Nombre o email..." />
+              )}
+            </div>
+            <div>
+              <label style={lbl}>Asignado a</label>
+              {companyUsers.length > 0 ? (
+                <select value={form.asignado_a||''} onChange={e=>set('asignado_a',e.target.value)} style={{...inp,cursor:'pointer'}}>
+                  <option value=''>— Sin asignar —</option>
+                  {companyUsers.map(u=><option key={u.id} value={u.email}>{u.name}</option>)}
+                </select>
+              ) : (
+                <input value={form.asignado_a||''} onChange={e=>set('asignado_a',e.target.value)} style={inp} placeholder="Nombre o email..." />
+              )}
+            </div>
+          </div>
+          {/* Fila: Estado + Prioridad */}
+          <div style={{ display:'grid',gridTemplateColumns:'1fr 1fr',gap:12 }}>
+            <div>
+              <label style={lbl}>Estado</label>
+              <select value={form.estado_tarea||1} onChange={e=>set('estado_tarea',Number(e.target.value))} style={{...inp,cursor:'pointer'}}>
+                {ESTADOS.map(s=><option key={s.v} value={s.v}>{s.l}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={lbl}>Prioridad</label>
+              <select value={form.prioridad||2} onChange={e=>set('prioridad',Number(e.target.value))} style={{...inp,cursor:'pointer'}}>
+                {PRIORIDADES.map(p=><option key={p.v} value={p.v}>{p.l}</option>)}
               </select>
             </div>
           </div>
+          {/* Fila: Tipo tarea + Req ID */}
+          <div style={{ display:'grid',gridTemplateColumns:'1fr 1fr',gap:12 }}>
+            <div>
+              <label style={lbl}>Tipo de tarea</label>
+              <select value={form.tipo_tarea||'i'} onChange={e=>set('tipo_tarea',e.target.value)} style={{...inp,cursor:'pointer'}}>
+                <option value='i'>🏠 Interna</option>
+                <option value='e'>🌐 Externa (cliente)</option>
+              </select>
+            </div>
+            <div>
+              <label style={lbl}>ID Requerimiento</label>
+              <input value={form.requerimiento_id||''} onChange={e=>set('requerimiento_id',e.target.value)} style={inp} placeholder="REQ-001 (opcional)" />
+            </div>
+          </div>
+          {/* Fechas */}
           {mostrarFecha && (
-            <div><label style={labelStyle}>Fecha compromiso</label><input type="date" value={form.fecha_compromiso||''} onChange={e=>set('fecha_compromiso',e.target.value)} style={inputStyle} /></div>
+            <div style={{ display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12 }}>
+              <div>
+                <label style={lbl}>Fecha compromiso</label>
+                <input type='date' value={form.fecha_compromiso||''} onChange={e=>set('fecha_compromiso',e.target.value)} style={inp} />
+              </div>
+              <div>
+                <label style={lbl}>Fecha inicio</label>
+                <input type='date' value={form.date_init||''} onChange={e=>set('date_init',e.target.value)} style={inp} />
+              </div>
+              <div>
+                <label style={lbl}>Fecha fin</label>
+                <input type='date' value={form.date_end||''} onChange={e=>set('date_end',e.target.value)} style={inp} />
+              </div>
+            </div>
           )}
         </div>
-        <div style={{ padding:'16px 24px', borderTop:'1px solid #eee', display:'flex', justifyContent:'flex-end', gap:10, backgroundColor:'#fafafa' }}>
-          <button onClick={onClose} style={{ padding:'9px 20px', border:'1px solid #ddd', borderRadius:6, background:'white', fontSize:13, cursor:'pointer', color:'#555' }}>Cancelar</button>
-          <button onClick={() => { onSave(form); onClose(); }} style={{ padding:'9px 22px', border:'none', borderRadius:6, background:'#1565C0', color:'white', fontSize:13, cursor:'pointer', fontWeight:600 }}>✓ Aplicar</button>
+        <div style={{ padding:'14px 24px',borderTop:'1px solid #eee',display:'flex',justifyContent:'flex-end',gap:10,backgroundColor:'#fafafa',flexShrink:0 }}>
+          <button onClick={onClose} style={{ padding:'9px 20px',border:'1px solid #ddd',borderRadius:6,background:'white',fontSize:13,cursor:'pointer',color:'#555' }}>Cancelar</button>
+          <button onClick={() => { if (!(form.asunto||form.descripcion||'').trim()) { alert('El asunto es requerido'); return; } onSave(form); onClose(); }}
+            style={{ padding:'9px 22px',border:'none',borderRadius:6,background:'#1565C0',color:'white',fontSize:13,cursor:'pointer',fontWeight:600 }}>✓ Aplicar</button>
         </div>
       </div>
     </div>
@@ -403,7 +473,9 @@ function AttachmentsPanel({ meetingId }) {
 // ─── Componente principal ─────────────────────────────────────────────────────
 function MeetingDetail() {
   const { id } = useParams();
+  const { user } = useAuth();
   const [meeting, setMeeting]         = useState(null);
+  const [companyUsers, setCompanyUsers] = useState([]);
   const [transcription, setTranscription] = useState([]);
   const [acta, setActa]               = useState(null);
   const [actaDraft, setActaDraft]     = useState(null);
@@ -424,6 +496,7 @@ function MeetingDetail() {
 
   useEffect(() => {
     fetchMeetingData();
+    apiFetch('/admin/users/for-invite').then(r => r.ok && r.json()).then(d => d && setCompanyUsers(d)).catch(()=>{});
     if (!isEditingAny) {
       const interval = setInterval(fetchMeetingData, 5000);
       return () => clearInterval(interval);
@@ -804,6 +877,10 @@ function MeetingDetail() {
           ) : (
             <div>
               <div style={{ marginBottom:12, display:'flex', flexWrap:'wrap', gap:6, alignItems:'center' }}>
+                <button
+                  onClick={() => window.open(`${import.meta.env.VITE_API_BASE_URL}/meetings/${id}/tareas/excel`, '_blank')}
+                  style={{ ...btnStyle('#2E7D32'), marginRight:4 }}
+                >📥 Excel reunión</button>
                 <button onClick={saveTareas} disabled={!tareasDirty||savingTareas} style={btnStyle('#1565C0',!tareasDirty||savingTareas)}>
                   {savingTareas?'Guardando…':'💾 Guardar cambios'}
                 </button>
