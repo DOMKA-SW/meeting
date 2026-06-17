@@ -18,11 +18,11 @@ const execFileAsync = promisify(execFile);
 
 const app = express();
 app.set('trust proxy', 1); // Confiar en Nginx como proxy
-// Sanitización de inputs
+// Sanitización básica anti-XSS en todos los inputs
 app.use((req, _res, next) => {
-  const sanitize = v => typeof v === 'string' ? v.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi,'').trim() : v;
-  const deep = obj => { if (obj && typeof obj === 'object') Object.keys(obj).forEach(k => { obj[k] = typeof obj[k] === 'string' ? sanitize(obj[k]) : deep(obj[k]); }); return obj; };
-  if (req.body) deep(req.body);
+  const san = v => typeof v==='string' ? v.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi,'').trim() : v;
+  const deep = o => { if(o&&typeof o==='object') Object.keys(o).forEach(k=>{ o[k]=typeof o[k]==='string'?san(o[k]):deep(o[k]); }); return o; };
+  if(req.body) deep(req.body);
   next();
 });
 // ── Logging de errores no capturados ─────────────────────────────────────────
@@ -234,34 +234,33 @@ const createTables = async () => {
     tarea_id         VARCHAR(50),
     tipo             VARCHAR(20)  DEFAULT 'nueva',
     descripcion      TEXT,
-    detalle          TEXT,
     asunto           VARCHAR(500) DEFAULT '',
+    detalle          TEXT,
     responsable      VARCHAR(200),
     asignado_a       VARCHAR(200) DEFAULT '',
     user_create      VARCHAR(200) DEFAULT '',
+    estado           VARCHAR(50)  DEFAULT 'pendiente',
     estado_tarea     INT          DEFAULT 1,
     prioridad        INT          DEFAULT 2,
     tipo_tarea       CHAR(1)      DEFAULT 'i',
     requerimiento_id VARCHAR(100) DEFAULT '',
-    estado           VARCHAR(50)  DEFAULT 'pendiente',
-    fecha_compromiso VARCHAR(50),
+    fecha_compromiso VARCHAR(50)  DEFAULT '',
     date_init        VARCHAR(50)  DEFAULT '',
     date_end         VARCHAR(50)  DEFAULT ''
   )`);
-  // Migración: agregar columnas nuevas si ya existe la tabla
-  const newCols = [
+  // Migración: agregar columnas nuevas si la tabla ya existía
+  for (const [col, def] of [
+    ['asunto',           "VARCHAR(500) NOT NULL DEFAULT ''"],
     ['detalle',          'TEXT'],
-    ['asunto',           "VARCHAR(500) DEFAULT ''"],
-    ['asignado_a',       "VARCHAR(200) DEFAULT ''"],
-    ['user_create',      "VARCHAR(200) DEFAULT ''"],
-    ['estado_tarea',     'INT DEFAULT 1'],
-    ['prioridad',        'INT DEFAULT 2'],
-    ['tipo_tarea',       "CHAR(1) DEFAULT 'i'"],
-    ['requerimiento_id', "VARCHAR(100) DEFAULT ''"],
-    ['date_init',        "VARCHAR(50) DEFAULT ''"],
-    ['date_end',         "VARCHAR(50) DEFAULT ''"],
-  ];
-  for (const [col, def] of newCols) {
+    ['asignado_a',       "VARCHAR(200) NOT NULL DEFAULT ''"],
+    ['user_create',      "VARCHAR(200) NOT NULL DEFAULT ''"],
+    ['estado_tarea',     'INT NOT NULL DEFAULT 1'],
+    ['prioridad',        'INT NOT NULL DEFAULT 2'],
+    ['tipo_tarea',       "CHAR(1) NOT NULL DEFAULT 'i'"],
+    ['requerimiento_id', "VARCHAR(100) NOT NULL DEFAULT ''"],
+    ['date_init',        "VARCHAR(50) NOT NULL DEFAULT ''"],
+    ['date_end',         "VARCHAR(50) NOT NULL DEFAULT ''"],
+  ]) {
     try { await db.execute(`ALTER TABLE tareas ADD COLUMN ${col} ${def}`); } catch(_) {}
   }
 
@@ -516,43 +515,28 @@ const buildActaPrompt = (meta, sectionInputs, allTareasBruto, tareasAnt, suppBlk
   'Eres un redactor experto en actas corporativas en español latinoamericano.',
   'Genera un acta COMPLETA y DETALLADA. No omitas tareas ni decisiones mencionadas.',
   '',
-  `REUNIÓN: ${meta.cliente} — ${meta.proyecto}`,
-  `Fecha: ${meta.fecha} | Inicio: ${meta.hora_inicio} | Fin: ${meta.hora_fin}`,
-  `Responsable: ${meta.responsable}`,
-  `Participantes: ${(meta.participantes||[]).join(', ')}`,
+  `REUNIÓN: ${meta.cliente} — ${meta.proyecto} | ${meta.fecha} | ${meta.hora_inicio}–${meta.hora_fin}`,
+  `Responsable: ${meta.responsable} | Participantes: ${(meta.participantes||[]).join(', ')}`,
   '',
   tareasAnt.length ? `TAREAS ANTERIORES (NO incluir en nuevas):\n${tareasAnt.map(t=>`  [${t.estado.toUpperCase()}] ${t.descripcion} — ${t.responsable||'—'}`).join('\n')}` : '',
-  '',
-  'CONTENIDO DE LA REUNIÓN:',
-  sectionInputs,
-  suppBlk,
-  '',
-  'TAREAS PRE-DETECTADAS (consolida y amplía, NO omitas ninguna):',
-  JSON.stringify(allTareasBruto, null, 2),
-  '',
+  'CONTENIDO DE LA REUNIÓN:', sectionInputs, suppBlk,
+  'TAREAS PRE-DETECTADAS (consolida y amplía, NO omitas ninguna):', JSON.stringify(allTareasBruto,null,2),
   '━━ INSTRUCCIONES ━━',
-  '',
-  '"resumen_reunion": 5-8 frases ejecutivas en prosa.',
-  '  Estructura: 1.Objetivo 2.Temas tratados 3.Decisiones tomadas (con nombre de quien decide) 4.Próximos pasos',
+  '"resumen_reunion": 5-8 frases ejecutivas. 1.Objetivo 2.Temas 3.Decisiones (con nombres) 4.Próximos pasos.',
   hasSup ? 'Integra información de notas y audios adjuntos.' : '',
-  '',
-  '"tareas_nuevas": EXTRAE TODAS las tareas concretas mencionadas. Sé exhaustivo.',
-  '  ✅ VÁLIDAS: acción + objeto específico. Ej: "Juan enviará el contrato al cliente el viernes"',
-  '  ✅ VÁLIDAS: compromisos implícitos del contexto aunque no digan explícitamente "tarea"',
+  '"tareas_nuevas": EXTRAE TODAS las tareas concretas. Sé exhaustivo.',
+  '  ✅ VÁLIDAS: acción + objeto específico. Compromisos implícitos del contexto.',
   '  ❌ INVÁLIDAS: "Revisar" | "Hacer seguimiento" | "Ver el tema" | "Coordinar"',
-  '  - responsable: nombre completo si se mencionó, vacío si no',
-  `  - fecha_compromiso: calcula en días hábiles desde ${fechaDef}. Default: ${fechaDef}`,
-  '  - asunto: título corto de máx 8 palabras que resuma la tarea',
-  '  - detalle: descripción ampliada con todo el contexto mencionado en la reunión',
-  '  - prioridad: 3=Alta si es urgente/bloqueante, 2=Media si es importante, 1=Baja si es mejora',
-  '  - tipo_tarea: "e" si involucra al cliente/externo, "i" si es interna',
-  '  - NO duplicar tareas anteriores. Consolida similares. Sin límite de tareas.',
-  '',
-  `"tareas_anteriores": ${tareasAnt.length ? `Incluye las ${tareasAnt.length} anteriores con su estado actualizado si se mencionaron en la reunión` : '[]'}`,
-  '',
-  '"observaciones_generales": Riesgos, dependencias, acuerdos importantes, contexto relevante.',
-  '',
-  'FORMATO — JSON válido, sin texto antes ni después:',
+  '  - asunto: título corto máx 8 palabras',
+  '  - detalle: descripción ampliada con todo el contexto',
+  '  - responsable: nombre si se mencionó',
+  `  - fecha_compromiso: días hábiles desde ${fechaDef}. Default: ${fechaDef}`,
+  '  - prioridad: 3=Alta si es urgente/bloqueante, 2=Media, 1=Baja',
+  '  - tipo_tarea: "e" si involucra cliente/externo, "i" si es interna',
+  '  - Sin límite de tareas. IDs: tarea_001, tarea_002...',
+  `"tareas_anteriores": ${tareasAnt.length ? `Incluye las ${tareasAnt.length} anteriores con estado actualizado` : '[]'}`,
+  '"observaciones_generales": Riesgos, dependencias, acuerdos importantes.',
+  'FORMATO — JSON válido sin texto antes ni después:',
   `{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","asunto":"","detalle":"","responsable":"","fecha_compromiso":"${fechaDef}","prioridad":2,"tipo_tarea":"i"}],"resumen_reunion":"","observaciones_generales":""}`,
   'SOLO JSON VÁLIDO.',
 ].join('\n');
@@ -674,7 +658,9 @@ const finalizeMeeting = async mid => {
   for (let i = 0; i < td.length; i++) {
     const t = td[i];
     await db.execute(
-      'INSERT INTO tareas (meeting_id,tarea_id,tipo,descripcion,asunto,detalle,responsable,asignado_a,user_create,estado,estado_tarea,prioridad,tipo_tarea,fecha_compromiso,date_end) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      `INSERT INTO tareas (meeting_id,tarea_id,tipo,descripcion,asunto,detalle,responsable,asignado_a,
+        user_create,estado,estado_tarea,prioridad,tipo_tarea,fecha_compromiso,date_end)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [mid, fmtId(i+1), 'nueva',
        (t.descripcion||'').trim(),
        (t.asunto||t.descripcion||'').substring(0,100).trim(),
@@ -762,64 +748,6 @@ const procAudio = async (aid, fp, mid, parts=[], cli='', proj='', term='') => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // RUTAS PÚBLICAS (sin autenticación)
 // ═══════════════════════════════════════════════════════════════════════════════
-
-// ─── Excel tareas por reunión ─────────────────────────────────────────────────
-app.get('/meetings/:id/tareas/excel', async (req, res) => {
-  try {
-    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
-      return res.status(403).json({ error: 'Sin acceso' });
-    const [[m]] = await db.execute('SELECT cliente,proyecto,started_at FROM meetings WHERE id=?', [req.params.id]);
-    const [tareas] = await db.execute('SELECT * FROM tareas WHERE meeting_id=? ORDER BY tipo DESC,id', [req.params.id]);
-    const ESTADOS = {1:'Sin iniciar',2:'En progreso',3:'En revisión',4:'Finalizada',5:'Planeación',7:'Respuesta Cliente',8:'Pend otros procesos'};
-    const PRIORIDADES = {1:'Baja',2:'Media',3:'Alta'};
-    const rows = [['ID','Tipo','Asunto','Descripción','Detalle','Responsable','Asignado a','Estado','Prioridad','Tipo Tarea','Req ID','Fecha Compromiso','Fecha Inicio','Fecha Fin']];
-    for (const t of tareas) rows.push([
-      t.tarea_id||t.id, t.tipo, t.asunto||'', t.descripcion||'', t.detalle||'',
-      t.responsable||'', t.asignado_a||'', ESTADOS[t.estado_tarea]||t.estado||'',
-      PRIORIDADES[t.prioridad]||'', t.tipo_tarea==='e'?'Externa':'Interna',
-      t.requerimiento_id||'', t.fecha_compromiso||'', t.date_init||'', t.date_end||''
-    ]);
-    const sep = ',';
-    const csv = rows.map(r => r.map(v => `"${String(v||'').replace(/"/g,'""')}"`).join(sep)).join('\r\n');
-    const fecha = m?.started_at ? new Date(m.started_at).toISOString().split('T')[0] : 'sin-fecha';
-    const nombre = `Tareas_${(m?.cliente||'').replace(/[^a-z0-9]/gi,'_')}_${(m?.proyecto||'').replace(/[^a-z0-9]/gi,'_')}_${fecha}.csv`;
-    res.setHeader('Content-Type','text/csv;charset=utf-8');
-    res.setHeader('Content-Disposition',`attachment; filename="${nombre}"`);
-    res.send('\uFEFF' + csv);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ─── Excel tareas empresa completa ────────────────────────────────────────────
-app.get('/tareas/excel', async (req, res) => {
-  try {
-    const [tareas] = await db.execute(
-      `SELECT t.*,m.cliente,m.proyecto,m.started_at FROM tareas t
-       JOIN meetings m ON m.id=t.meeting_id
-       WHERE m.company_id=? ORDER BY m.started_at DESC,t.tipo DESC,t.id`,
-      [req.user.company_id]
-    );
-    const ESTADOS = {1:'Sin iniciar',2:'En progreso',3:'En revisión',4:'Finalizada',5:'Planeación',7:'Respuesta Cliente',8:'Pend otros procesos'};
-    const PRIORIDADES = {1:'Baja',2:'Media',3:'Alta'};
-    const rows = [['Reunión','Cliente','Proyecto','ID','Tipo','Asunto','Descripción','Detalle','Responsable','Asignado a','Estado','Prioridad','Tipo Tarea','Req ID','Fecha Compromiso','Fecha Inicio','Fecha Fin']];
-    for (const t of tareas) rows.push([
-      t.started_at ? new Date(t.started_at).toISOString().split('T')[0] : '',
-      t.cliente||'', t.proyecto||'',
-      t.tarea_id||t.id, t.tipo,
-      t.asunto||'', t.descripcion||'', t.detalle||'',
-      t.responsable||'', t.asignado_a||'',
-      ESTADOS[t.estado_tarea]||t.estado||'',
-      PRIORIDADES[t.prioridad]||'',
-      t.tipo_tarea==='e'?'Externa':'Interna',
-      t.requerimiento_id||'', t.fecha_compromiso||'', t.date_init||'', t.date_end||''
-    ]);
-    const csv = rows.map(r => r.map(v => '"' + String(v||'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
-    const hoy = new Date().toISOString().split('T')[0];
-    res.setHeader('Content-Type','text/csv;charset=utf-8');
-    res.setHeader('Content-Disposition',`attachment; filename="Tareas_Empresa_\${hoy}.csv"`);
-    res.send('\uFEFF' + csv);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 // ─── Login ────────────────────────────────────────────────────────────────────
@@ -1044,6 +972,75 @@ app.get('/admin/users/for-invite', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Usuarios para selects (tareas) ─────────────────────────────────────────
+app.get('/admin/users/company', async (req, res) => {
+  try {
+    const [r] = await db.execute(
+      'SELECT id, name, email FROM users WHERE company_id=? AND active=1 ORDER BY name',
+      [req.user.company_id]
+    );
+    res.json(r);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Excel tareas por reunión ─────────────────────────────────────────────────
+app.get('/meetings/:id/tareas/excel', async (req, res) => {
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso' });
+    const [[m]] = await db.execute('SELECT cliente,proyecto,started_at FROM meetings WHERE id=?', [req.params.id]);
+    const [rows] = await db.execute('SELECT * FROM tareas WHERE meeting_id=? ORDER BY tipo DESC,id', [req.params.id]);
+    const ESTADOS = {1:'Sin iniciar',2:'En progreso',3:'En revisión',4:'Finalizada',5:'Planeación',7:'Respuesta Cliente',8:'Pend otros procesos'};
+    const PRIO    = {1:'Baja',2:'Media',3:'Alta'};
+    const head = ['ID','Tipo','Asunto','Descripción','Detalle','Responsable','Asignado a','Estado','Prioridad','Tipo Tarea','Req ID','Fecha Compromiso','Fecha Inicio','Fecha Fin'];
+    const data = rows.map(t => [
+      t.tarea_id||t.id, t.tipo,
+      t.asunto||'', t.descripcion||'', t.detalle||'',
+      t.responsable||'', t.asignado_a||'',
+      ESTADOS[t.estado_tarea]||t.estado||'',
+      PRIO[t.prioridad]||'', t.tipo_tarea==='e'?'Externa':'Interna',
+      t.requerimiento_id||'', t.fecha_compromiso||'', t.date_init||'', t.date_end||''
+    ]);
+    const csv = [head,...data].map(r=>r.map(v=>`"${String(v||'').replace(/"/g,'""')}"`).join(',')).join('\r\n');
+    const fecha = m?.started_at ? new Date(m.started_at).toISOString().split('T')[0] : 'sin-fecha';
+    const nombre = `Tareas_${(m?.cliente||'').replace(/[^a-z0-9]/gi,'_')}_${(m?.proyecto||'').replace(/[^a-z0-9]/gi,'_')}_${fecha}.csv`;
+    res.setHeader('Content-Type','text/csv;charset=utf-8');
+    res.setHeader('Content-Disposition',`attachment; filename="${nombre}"`);
+    res.send('\uFEFF' + csv);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Excel tareas empresa completa ────────────────────────────────────────────
+app.get('/tareas/excel', async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT t.*,m.cliente,m.proyecto,m.started_at FROM tareas t
+       JOIN meetings m ON m.id=t.meeting_id
+       WHERE m.company_id=? ORDER BY m.started_at DESC,t.tipo DESC,t.id`,
+      [req.user.company_id]
+    );
+    const ESTADOS = {1:'Sin iniciar',2:'En progreso',3:'En revisión',4:'Finalizada',5:'Planeación',7:'Respuesta Cliente',8:'Pend otros procesos'};
+    const PRIO    = {1:'Baja',2:'Media',3:'Alta'};
+    const head = ['Reunión','Cliente','Proyecto','ID','Tipo','Asunto','Descripción','Detalle','Responsable','Asignado a','Estado','Prioridad','Tipo Tarea','Req ID','Fecha Compromiso','Fecha Inicio','Fecha Fin'];
+    const data = rows.map(t => [
+      t.started_at ? new Date(t.started_at).toISOString().split('T')[0] : '',
+      t.cliente||'', t.proyecto||'',
+      t.tarea_id||t.id, t.tipo,
+      t.asunto||'', t.descripcion||'', t.detalle||'',
+      t.responsable||'', t.asignado_a||'',
+      ESTADOS[t.estado_tarea]||t.estado||'',
+      PRIO[t.prioridad]||'',
+      t.tipo_tarea==='e'?'Externa':'Interna',
+      t.requerimiento_id||'', t.fecha_compromiso||'', t.date_init||'', t.date_end||''
+    ]);
+    const csv = [head,...data].map(r=>r.map(v=>`"${String(v||'').replace(/"/g,'""')}"`).join(',')).join('\r\n');
+    const hoy = new Date().toISOString().split('T')[0];
+    res.setHeader('Content-Type','text/csv;charset=utf-8');
+    res.setHeader('Content-Disposition',`attachment; filename="Tareas_Empresa_${hoy}.csv"`);
+    res.send('\uFEFF' + csv);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Reuniones ────────────────────────────────────────────────────────────────
 app.post('/startMeeting', async (req, res) => {
   const mid = uuidv4();
@@ -1191,8 +1188,26 @@ app.put('/meetings/:id/tareas', async (req, res) => {
     if (!Array.isArray(tareas)) return res.status(400).json({ error: 'array required' });
     await db.execute('DELETE FROM tareas WHERE meeting_id=?', [req.params.id]);
     for (const t of tareas) await db.execute(
-      'INSERT INTO tareas (meeting_id,tarea_id,tipo,descripcion,asunto,detalle,responsable,asignado_a,user_create,estado,estado_tarea,prioridad,tipo_tarea,requerimiento_id,fecha_compromiso,date_init,date_end) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [req.params.id, t.tarea_id||'', t.tipo||'nueva', t.descripcion||'', t.responsable||'', t.estado||'pendiente', t.fecha_compromiso||'']);
+      `INSERT INTO tareas (meeting_id,tarea_id,tipo,descripcion,asunto,detalle,responsable,asignado_a,
+        user_create,estado,estado_tarea,prioridad,tipo_tarea,requerimiento_id,fecha_compromiso,date_init,date_end)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [req.params.id,
+       t.tarea_id||'', t.tipo||'nueva',
+       t.descripcion||'',
+       t.asunto||t.descripcion||'',
+       t.detalle||'',
+       t.responsable||'',
+       t.asignado_a||t.responsable||'',
+       t.user_create||'',
+       t.estado||'pendiente',
+       t.estado_tarea||1,
+       t.prioridad||2,
+       t.tipo_tarea||'i',
+       t.requerimiento_id||'',
+       t.fecha_compromiso||'',
+       t.date_init||'',
+       t.date_end||''
+      ]);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1238,8 +1253,23 @@ app.post('/meetings/from-text', async (req, res) => {
         const td = dedup(actaJson.tareas_nuevas || []);
         for (let i = 0; i < td.length; i++) {
           const t = td[i];
-          await db.execute('INSERT INTO tareas (meeting_id,tarea_id,tipo,descripcion,responsable,estado,fecha_compromiso) VALUES (?,?,?,?,?,?,?)',
-            [mid, fmtId(i+1), 'nueva', (t.descripcion||'').trim(), (t.responsable||'').trim(), 'pendiente', t.fecha_compromiso||addBizDays(meta.fecha,3)]);
+          await db.execute(
+            `INSERT INTO tareas (meeting_id,tarea_id,tipo,descripcion,asunto,detalle,responsable,asignado_a,
+              user_create,estado,estado_tarea,prioridad,tipo_tarea,fecha_compromiso,date_end)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [mid, fmtId(i+1), 'nueva',
+             (t.descripcion||'').trim(),
+             (t.asunto||t.descripcion||'').substring(0,100).trim(),
+             (t.detalle||t.descripcion||'').trim(),
+             (t.responsable||'').trim(),
+             (t.responsable||'').trim(),
+             meta.responsable||'',
+             'pendiente', 1,
+             t.prioridad||2,
+             t.tipo_tarea||'i',
+             t.fecha_compromiso||addBizDays(meta.fecha,3),
+             t.fecha_compromiso||addBizDays(meta.fecha,3)
+            ]);
         }
       } catch(e) { console.error(`[${mid}] from-text error:`, e.message); }
     })();
