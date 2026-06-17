@@ -260,7 +260,6 @@ export function RecordingProvider({ children }) {
     setForm({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'' });
     setMeetingId(null);
     setStatus('idle');
-    setRecording(false);
   }, []);
 
   const stopMeeting = useCallback(async () => {
