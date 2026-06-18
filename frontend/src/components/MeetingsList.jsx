@@ -31,7 +31,22 @@ export default function MeetingsList() {
 
   return (
     <div>
-      <h1>Reuniones</h1>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
+        <h1 style={{ margin:0 }}>Reuniones</h1>
+        <button onClick={async () => {
+          const token = localStorage.getItem('auth_token');
+          const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/tareas/excel`, { headers:{ Authorization:`Bearer ${token}` } });
+          if (!res.ok) { alert('Error al descargar'); return; }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `Tareas_Empresa_${new Date().toISOString().split('T')[0]}.csv`;
+          a.click(); URL.revokeObjectURL(url);
+        }} style={{ padding:'9px 18px', backgroundColor:'#2E7D32', color:'white', border:'none', borderRadius:6, fontSize:13, fontWeight:600, cursor:'pointer' }}>
+          📥 Descargar todas las tareas
+        </button>
+      </div>
       {meetings.length === 0 ? (
         <div style={{ padding:30, backgroundColor:'#f9fafb', borderRadius:8, textAlign:'center', color:'#666' }}>
           <p>No hay reuniones grabadas aún.</p>
