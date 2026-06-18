@@ -53,6 +53,10 @@ const inputStyle = { width:'100%', padding:'8px 12px', borderRadius:6, border:'1
 
 export default function RecordMeeting() {
   const navigate = useNavigate();
+  const [companyUsers, setCompanyUsers] = useState([]);
+  useEffect(() => {
+    apiFetch('/admin/users/company').then(r=>r.ok&&r.json()).then(d=>d&&setCompanyUsers(d)).catch(()=>{});
+  }, []);
   const {
     isRecording, form, setForm, duration, chunkNumber, progress,
     statusMsg, errorMsg, setErrorMsg, audioSource, startMeeting, stopMeeting, resetMeetingForm
@@ -98,8 +102,29 @@ export default function RecordMeeting() {
               <label style={labelStyle}>
                 Participantes <span style={{ color:'#2196F3', fontSize:12 }}>★ Mejora la identificación de speakers</span>
               </label>
-              <input style={inputStyle} value={form.participantes} onChange={e => setForm(f=>({...f,participantes:e.target.value}))} placeholder="Juan Pérez, María García, Carlos López" />
-              <p style={{ fontSize:11, color:'#888', margin:'3px 0 0' }}>Separa con comas. Los nombres se envían a Whisper para mejor transcripción.</p>
+              {companyUsers.length > 0 ? (
+                <div>
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:6, padding:'8px 10px', border:'1px solid #dde1e7', borderRadius:6, backgroundColor:'white', minHeight:42 }}>
+                    {companyUsers.map(u => {
+                      const selected = form.participantes.split(/[,;]/).map(p=>p.trim()).filter(Boolean).includes(u.name);
+                      return (
+                        <button key={u.id} type="button" onClick={() => {
+                          const arr = form.participantes.split(/[,;]/).map(p=>p.trim()).filter(Boolean);
+                          const idx = arr.indexOf(u.name);
+                          if (idx >= 0) arr.splice(idx,1); else arr.push(u.name);
+                          setForm(f=>({...f, participantes: arr.join(', ')}));
+                        }} style={{ padding:'3px 10px', borderRadius:20, fontSize:12, cursor:'pointer', border:'1px solid', fontWeight:500, backgroundColor:selected?'#1565C0':'#f0f4f8', color:selected?'white':'#555', borderColor:selected?'#1565C0':'#ccc' }}>
+                          {selected?'✓ ':''}{u.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p style={{ fontSize:11, color:'#888', margin:'3px 0 0' }}>Haz clic para seleccionar participantes. También puedes escribir: <input style={{fontSize:11,border:'none',borderBottom:'1px solid #ddd',outline:'none',padding:'1px 4px',width:200}} value={form.participantes} onChange={e=>setForm(f=>({...f,participantes:e.target.value}))} placeholder="nombres separados por comas" /></p>
+                </div>
+              ) : (
+                <input style={inputStyle} value={form.participantes} onChange={e => setForm(f=>({...f,participantes:e.target.value}))} placeholder="Juan Pérez, María García, Carlos López" />
+              )}
+              <p style={{ fontSize:11, color:'#888', margin:'3px 0 0' }}>Los nombres se envían a Whisper para mejor transcripción.</p>
             </div>
             <div style={{ marginBottom:12 }}>
               <label style={labelStyle}>
