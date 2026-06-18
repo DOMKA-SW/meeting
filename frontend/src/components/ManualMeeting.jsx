@@ -79,6 +79,10 @@ export default function ManualMeeting() {
   const [modo, setModo]                   = useState('notas');
   const [texto, setTexto]                 = useState('');
   const [form, setForm]                   = useState({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'' });
+  const [companyUsers, setCompanyUsers]   = useState([]);
+  useEffect(() => {
+    apiFetch('/admin/users/company').then(r=>r.ok&&r.json()).then(d=>d&&setCompanyUsers(d)).catch(()=>{});
+  }, []);
   const [fecha, setFecha]                 = useState('');
   const [horaInicio, setHoraInicio]       = useState('');
   const [horaFin, setHoraFin]             = useState('');
@@ -181,7 +185,28 @@ export default function ManualMeeting() {
         </div>
         <div style={{ marginBottom:12 }}>
           <label style={labelStyle}>Participantes</label>
-          <input style={inputStyle} value={form.participantes} onChange={e=>set('participantes',e.target.value)} placeholder="Juan Pérez, María García (separa con comas)" />
+          {companyUsers.length > 0 ? (
+            <div>
+              <div style={{ display:'flex', flexWrap:'wrap', gap:6, padding:'8px 10px', border:'1px solid #dde1e7', borderRadius:6, backgroundColor:'white', minHeight:42, marginBottom:4 }}>
+                {companyUsers.map(u => {
+                  const selected = form.participantes.split(/[,;]/).map(p=>p.trim()).filter(Boolean).includes(u.name);
+                  return (
+                    <button key={u.id} type="button" onClick={() => {
+                      const arr = form.participantes.split(/[,;]/).map(p=>p.trim()).filter(Boolean);
+                      const idx = arr.indexOf(u.name);
+                      if (idx >= 0) arr.splice(idx,1); else arr.push(u.name);
+                      set('participantes', arr.join(', '));
+                    }} style={{ padding:'3px 10px', borderRadius:20, fontSize:12, cursor:'pointer', border:'1px solid', fontWeight:500, backgroundColor:selected?'#1565C0':'#f0f4f8', color:selected?'white':'#555', borderColor:selected?'#1565C0':'#ccc' }}>
+                      {selected?'✓ ':''}{u.name}
+                    </button>
+                  );
+                })}
+              </div>
+              <input style={{...inputStyle, fontSize:12}} value={form.participantes} onChange={e=>set('participantes',e.target.value)} placeholder="También puedes escribir nombres separados por comas" />
+            </div>
+          ) : (
+            <input style={inputStyle} value={form.participantes} onChange={e=>set('participantes',e.target.value)} placeholder="Juan Pérez, María García (separa con comas)" />
+          )}
         </div>
         <div style={{ marginBottom:12 }}>
           <label style={labelStyle}>
