@@ -344,7 +344,7 @@ const addBizDays = (start, days) => {
   while (added < days) { d.setDate(d.getDate()+1); if (d.getDay()!==0 && d.getDay()!==6) added++; }
   return d.toISOString().split('T')[0];
 };
-const fmtId    = n => `tarea_${String(n).padStart(3,'0')}`;
+const fmtId    = n => String(n).padStart(3,'0');  // ID numérico: 001, 002...
 const callLLM = async (prompt, model = LLM_MODEL, retries = 3) => {
   const client    = (AI_PROVIDER === 'openai' && openaiClient) ? openaiClient : groq;
   const useModel  = (model === 'llama-3.3-70b-versatile' || model === 'llama-3.1-8b-instant')
@@ -533,11 +533,11 @@ const buildActaPrompt = (meta, sectionInputs, allTareasBruto, tareasAnt, suppBlk
   `  - fecha_compromiso: días hábiles desde ${fechaDef}. Default: ${fechaDef}`,
   '  - prioridad: 3=Alta si es urgente/bloqueante, 2=Media, 1=Baja',
   '  - tipo_tarea: "e" si involucra cliente/externo, "i" si es interna',
-  '  - Sin límite de tareas. IDs: tarea_001, tarea_002...',
+  '  - Sin límite de tareas. IDs numéricos: 001, 002, 003......',
   `"tareas_anteriores": ${tareasAnt.length ? `Incluye las ${tareasAnt.length} anteriores con estado actualizado` : '[]'}`,
   '"observaciones_generales": Riesgos, dependencias, acuerdos importantes.',
   'FORMATO — JSON válido sin texto antes ni después:',
-  `{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","asunto":"","detalle":"","responsable":"","fecha_compromiso":"${fechaDef}","prioridad":2,"tipo_tarea":"i"}],"resumen_reunion":"","observaciones_generales":""}`,
+  `{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"001","descripcion":"","asunto":"","detalle":"","responsable":"","fecha_compromiso":"${fechaDef}","prioridad":2,"tipo_tarea":"i"}],"resumen_reunion":"","observaciones_generales":""}`,
   'SOLO JSON VÁLIDO.',
 ].join('\n');
 
@@ -585,7 +585,7 @@ const genActa = async (mid, meta, fechaDef, tareasAnt=[]) => {
       const antStr   = tareasAnt.length ? `\nTAREAS ANTERIORES:\n${tareasAnt.map(t=>`• [${t.estado}] ${t.descripcion}`).join('\n')}` : '';
       const notasStr = tareasDeNotas.length > 0 ? `\nTAREAS DETECTADAS EN NOTAS ADICIONALES (inclúyelas si son concretas):\n${tareasDeNotas.map(t=>`• ${t.descripcion}${t.responsable?' ('+t.responsable+')':''}`).join('\n')}` : '';
       try {
-        const raw = await callLLM(`Genera acta. DATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}${notasStr}\nTRANSCRIPCIÓN:${tscr}${sb}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: tareas explícitas, NO duplicar anteriores, IDs tarea_001/002..., máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');
+        const raw = await callLLM(`Genera acta. DATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}${notasStr}\nTRANSCRIPCIÓN:${tscr}${sb}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: tareas explícitas, NO duplicar anteriores, IDs numéricos: 001, 002......, máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');
         actaJson = parseJSON(raw);
       } catch(e) { console.error('genActa raw:', e.message); }
     }
@@ -612,7 +612,7 @@ const genActaText = async (texto, modo, meta, fechaDef, tareasAnt=[]) => {
   }
   const ctx    = { notas:'NOTAS LIBRES.', transcripcion:'TRANSCRIPCIÓN con diálogos.', email:'EMAIL resumen.' };
   const antStr = tareasAnt.length ? `\nTAREAS ANTERIORES:\n${tareasAnt.map(t=>`• [${t.estado}] ${t.descripcion}`).join('\n')}` : '';
-  const raw = await callLLM(`Redactor actas. TIPO:${ctx[modo]||ctx.notas}\nDATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}\nCONTENIDO:${input}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: solo explícitas+concretas, NO duplicar anteriores, IDs tarea_001/002..., máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');
+  const raw = await callLLM(`Redactor actas. TIPO:${ctx[modo]||ctx.notas}\nDATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}\nCONTENIDO:${input}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: solo explícitas+concretas, NO duplicar anteriores, IDs numéricos: 001, 002......, máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');
   const p = parseJSON(raw);
   if (p?.tareas_nuevas) p.tareas_nuevas = p.tareas_nuevas.map((t,i) => ({...t, id: fmtId(i+1)}));
   return p;
