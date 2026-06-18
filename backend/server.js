@@ -1,3 +1,12 @@
+// =============================================================================
+// SISTEMA DE ACTAS — BACKEND PRINCIPAL
+// =============================================================================
+// Servidor Express que gestiona autenticacion, grabacion de reuniones,
+// transcripcion con Whisper, generacion de actas con LLM (Groq u OpenAI),
+// gestion de tareas y portal del cliente.
+// Todos los endpoints protegidos requieren JWT en el header Authorization.
+// =============================================================================
+
 require('dotenv').config();
 const express    = require('express');
 const mysql      = require('mysql2/promise');
@@ -15,6 +24,15 @@ const rateLimit  = require('express-rate-limit');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
+
+// =============================================================================
+// CONFIGURACION DE EXPRESS Y SEGURIDAD GLOBAL
+// Helmet agrega cabeceras HTTP seguras automaticamente (X-Frame-Options,
+// X-Content-Type-Options, HSTS, etc.).
+// El middleware de sanitizacion recorre todo el body de cada request y
+// elimina etiquetas <script> para prevenir ataques XSS.
+// trust proxy le dice a Express que confie en la IP real enviada por Nginx.
+// =============================================================================
 
 const app = express();
 app.set('trust proxy', 1); // Confiar en Nginx como proxy
@@ -66,7 +84,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// ─── Rate Limiting ────────────────────────────────────────────────────────────
+// =============================================================================
+// RATE LIMITING
+// Proteccion contra fuerza bruta y abuso de la API.
+// loginLimiter: maximo 15 intentos de login por IP en 15 minutos.
+// apiLimiter:   maximo 200 peticiones por IP por minuto para el resto de rutas.
+// =============================================================================
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
   max: 15,                   // máximo 15 intentos por IP
@@ -87,7 +110,12 @@ app.use('/login', loginLimiter);
 app.use('/client-login', loginLimiter);
 app.use(apiLimiter);
 
-// ─── Config ───────────────────────────────────────────────────────────────────
+// =============================================================================
+// CONSTANTES Y RUTAS DE ALMACENAMIENTO
+// SECTION_SIZE: cuantos chunks de audio forman una seccion a resumir.
+// WORDS_PER_CHUNK: limite de palabras antes de dividir una transcripcion larga.
+// Los directorios de storage se crean automaticamente si no existen.
+// =============================================================================
 const SECTION_SIZE    = 12;
 const WORDS_PER_CHUNK = 2500;
 const SPEAKER_BATCH   = 60;
@@ -110,6 +138,17 @@ const JWT_SECRET       = process.env.JWT_SECRET;
 const SUPERADMIN_EMAIL = process.env.SUPERADMIN_EMAIL || 'admin@dataella.tech';
 
 // Hash legacy SHA-256 (solo para migración de contraseñas antiguas)
+// =============================================================================
+// AUTENTICACION Y HASHING DE CONTRASENAS
+// Se usa bcrypt para almacenar contrasenas de forma segura (12 rounds).
+// sha256Hash existe solo para migrar contrasenas antiguas: al primer login
+// exitoso con hash SHA-256 se rehashea automaticamente a bcrypt.
+// authMiddleware: verifica el JWT en cada request protegido.
+// requireRole:    middleware de autorizacion por rol (superadmin/admin/member).
+// clientAuth:     variante para el portal del cliente (rol = 'client').
+// canAccess:      verifica que el usuario tenga acceso a una reunion especifica
+//                 respetando el aislamiento entre empresas.
+// =============================================================================
 const sha256Hash = pwd => crypto.createHash('sha256').update(pwd + JWT_SECRET).digest('hex');
 
 // Hash nuevo con bcrypt
@@ -156,7 +195,15 @@ const clientAuth = (req, res, next) => {
   }
 };
 
-// ─── MySQL ────────────────────────────────────────────────────────────────────
+// =============================================================================
+// BASE DE DATOS MYSQL
+// Se usa un pool de conexiones para manejar multiples requests concurrentes.
+// createTables() crea toda la estructura al arrancar si no existe (autogestionado).
+// Incluye migracion automatica: si la tabla tareas ya existe con la estructura
+// anterior, ALTER TABLE agrega las columnas nuevas sin perder datos.
+// createSuperadmin() crea el primer usuario administrador solo si no hay
+// ninguno con rol superadmin (ejecucion unica en el primer arranque).
+// =============================================================================
 let db;
 const initDB = async () => {
   const config = process.env.MYSQL_URL
@@ -298,8 +345,15 @@ const createSuperadmin = async () => {
   } catch(e) { console.error('createSuperadmin:', e.message); }
 };
 
-// ─── Groq ─────────────────────────────────────────────────────────────────────
-// ─── Proveedores de IA ────────────────────────────────────────────────────────
+// =============================================================================
+// PROVEEDORES DE IA: GROQ Y OPENAI
+// El sistema soporta dos proveedores para el LLM, seleccionables con
+// AI_PROVIDER en el .env (valores: 'groq' o 'openai').
+// Whisper (transcripcion de audio) SIEMPRE usa Groq independientemente del
+// proveedor LLM configurado, porque Groq lo ofrece sin costo.
+// callLLM() selecciona automaticamente el cliente correcto y maneja reintentos
+// ante errores 429 (rate limit) con espera exponencial.
+// =============================================================================
 const GROQ_API_KEY   = process.env.GROQ_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const AI_PROVIDER    = (process.env.AI_PROVIDER || 'groq').toLowerCase();
@@ -337,14 +391,22 @@ const upload = multer({
   }
 });
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// =============================================================================
+// FUNCIONES AUXILIARES
+// sleep:       pausa para reintentos ante rate limit.
+// addBizDays:  calcula fechas de compromiso en dias habiles (lunes-viernes).
+// fmtId:       formatea el numero de tarea como string: 1 -> "tarea_001".
+// parseJSON:   parsea respuestas del LLM tolerando texto extra antes/despues del JSON.
+// dedup:       elimina tareas duplicadas o muy vagas de la lista generada por el LLM.
+// isMeetingApproved / canAccess: control de acceso y estado de aprobacion.
+// =============================================================================
 const sleep      = ms => new Promise(r => setTimeout(r, ms));
 const addBizDays = (start, days) => {
   const d = new Date(start); let added = 0;
   while (added < days) { d.setDate(d.getDate()+1); if (d.getDay()!==0 && d.getDay()!==6) added++; }
   return d.toISOString().split('T')[0];
 };
-const fmtId    = n => String(n).padStart(3,'0');  // ID numérico: 001, 002...
+const fmtId    = n => `tarea_${String(n).padStart(3,'0')}`;
 const callLLM = async (prompt, model = LLM_MODEL, retries = 3) => {
   const client    = (AI_PROVIDER === 'openai' && openaiClient) ? openaiClient : groq;
   const useModel  = (model === 'llama-3.3-70b-versatile' || model === 'llama-3.1-8b-instant')
@@ -391,7 +453,15 @@ const canAccess = async (mid, uid, cid, role) => {
   return inv.length > 0;
 };
 
-// ─── Suplementos ──────────────────────────────────────────────────────────────
+// =============================================================================
+// SUPLEMENTOS: NOTAS Y AUDIOS ADJUNTOS
+// Las notas de texto y los audios adicionales subidos durante o despues de la
+// reunion se incluyen como contexto extra en el prompt del acta final.
+// extractTareasFromSupplements: usa el LLM para detectar tareas concretas
+// dentro de las notas y transcripciones de audios adjuntos.
+// waitAudios: espera a que todos los audios adjuntos terminen de transcribirse
+// antes de generar el acta, para incluir su contenido completo.
+// =============================================================================
 const getSupplements = async mid => {
   const [notes]  = await db.execute('SELECT * FROM meeting_notes WHERE meeting_id=? ORDER BY created_at', [mid]);
   const [audios] = await db.execute(`SELECT file_name,transcription FROM meeting_attachments WHERE meeting_id=? AND transcription_status='done' AND transcription IS NOT NULL AND transcription!=''`, [mid]);
@@ -454,7 +524,15 @@ const getLinkedTareas = async id => {
   return r;
 };
 
-// ─── Speaker improvement ──────────────────────────────────────────────────────
+// =============================================================================
+// DIARIZACION DE SPEAKERS
+// Proceso de identificar quien habla en cada linea de la transcripcion.
+// Whisper transcribe el audio pero no siempre identifica correctamente a los
+// participantes. improveSpeak envia lotes de lineas al LLM con los nombres
+// reales de los participantes para que asigne el speaker correcto.
+// Se procesa en batches de SPEAKER_BATCH lineas para no exceder el limite
+// de tokens del modelo.
+// =============================================================================
 const improveSpeak = async (trans, parts=[]) => {
   if (!GROQ_API_KEY || !trans.length) return trans;
   const res = [...trans];
@@ -472,7 +550,16 @@ const improveSpeak = async (trans, parts=[]) => {
   return res;
 };
 
-// ─── Sección ──────────────────────────────────────────────────────────────────
+// =============================================================================
+// PROCESAMIENTO POR SECCIONES
+// Para reuniones largas, la transcripcion se divide en secciones de
+// SECTION_SIZE chunks. Cada seccion se resume de forma independiente con
+// temas, decisiones y tareas detectadas.
+// Esto permite procesar reuniones de cualquier duracion sin exceder el
+// limite de tokens del LLM al generar el acta final.
+// checkSection: se llama despues de cada chunk procesado para disparar
+// automaticamente el resumen cuando se completa una seccion.
+// =============================================================================
 const genSection = async (mid, secNum, from, to) => {
   const [trans] = await db.execute(`SELECT id,speaker,text,chunk_number FROM transcriptions WHERE meeting_id=? AND chunk_number>=? AND chunk_number<=? ORDER BY chunk_number,id`, [mid, from, to]);
   if (!trans.length) return null;
@@ -510,7 +597,17 @@ const checkSection = async mid => {
   }
 };
 
-// ─── Acta final ───────────────────────────────────────────────────────────────
+// =============================================================================
+// GENERACION DEL ACTA FINAL
+// buildActaPrompt: construye el prompt estructurado para el LLM con todos
+// los datos de la reunion, tareas pre-detectadas, contexto de suplementos
+// e instrucciones precisas para generar el acta en el formato JSON requerido.
+// genActa: orquesta la generacion usando resumenes de secciones (optimo) o
+// la transcripcion completa directamente si no hay secciones.
+// genActaText: version para reuniones manuales (texto, email, notas libres).
+// El JSON del acta contiene: identificacion, tareas_anteriores, tareas_nuevas,
+// resumen_reunion y observaciones_generales.
+// =============================================================================
 const buildActaPrompt = (meta, sectionInputs, allTareasBruto, tareasAnt, suppBlk, hasSup, fechaDef) => [
   'Eres un redactor experto en actas corporativas en español latinoamericano.',
   'Genera un acta COMPLETA y DETALLADA. No omitas tareas ni decisiones mencionadas.',
@@ -533,11 +630,11 @@ const buildActaPrompt = (meta, sectionInputs, allTareasBruto, tareasAnt, suppBlk
   `  - fecha_compromiso: días hábiles desde ${fechaDef}. Default: ${fechaDef}`,
   '  - prioridad: 3=Alta si es urgente/bloqueante, 2=Media, 1=Baja',
   '  - tipo_tarea: "e" si involucra cliente/externo, "i" si es interna',
-  '  - Sin límite de tareas. IDs numéricos: 001, 002, 003......',
+  '  - Sin límite de tareas. IDs: tarea_001, tarea_002...',
   `"tareas_anteriores": ${tareasAnt.length ? `Incluye las ${tareasAnt.length} anteriores con estado actualizado` : '[]'}`,
   '"observaciones_generales": Riesgos, dependencias, acuerdos importantes.',
   'FORMATO — JSON válido sin texto antes ni después:',
-  `{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"001","descripcion":"","asunto":"","detalle":"","responsable":"","fecha_compromiso":"${fechaDef}","prioridad":2,"tipo_tarea":"i"}],"resumen_reunion":"","observaciones_generales":""}`,
+  `{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","asunto":"","detalle":"","responsable":"","fecha_compromiso":"${fechaDef}","prioridad":2,"tipo_tarea":"i"}],"resumen_reunion":"","observaciones_generales":""}`,
   'SOLO JSON VÁLIDO.',
 ].join('\n');
 
@@ -585,7 +682,7 @@ const genActa = async (mid, meta, fechaDef, tareasAnt=[]) => {
       const antStr   = tareasAnt.length ? `\nTAREAS ANTERIORES:\n${tareasAnt.map(t=>`• [${t.estado}] ${t.descripcion}`).join('\n')}` : '';
       const notasStr = tareasDeNotas.length > 0 ? `\nTAREAS DETECTADAS EN NOTAS ADICIONALES (inclúyelas si son concretas):\n${tareasDeNotas.map(t=>`• ${t.descripcion}${t.responsable?' ('+t.responsable+')':''}`).join('\n')}` : '';
       try {
-        const raw = await callLLM(`Genera acta. DATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}${notasStr}\nTRANSCRIPCIÓN:${tscr}${sb}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: tareas explícitas, NO duplicar anteriores, IDs numéricos: 001, 002......, máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');
+        const raw = await callLLM(`Genera acta. DATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}${notasStr}\nTRANSCRIPCIÓN:${tscr}${sb}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: tareas explícitas, NO duplicar anteriores, IDs tarea_001/002..., máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');
         actaJson = parseJSON(raw);
       } catch(e) { console.error('genActa raw:', e.message); }
     }
@@ -612,13 +709,21 @@ const genActaText = async (texto, modo, meta, fechaDef, tareasAnt=[]) => {
   }
   const ctx    = { notas:'NOTAS LIBRES.', transcripcion:'TRANSCRIPCIÓN con diálogos.', email:'EMAIL resumen.' };
   const antStr = tareasAnt.length ? `\nTAREAS ANTERIORES:\n${tareasAnt.map(t=>`• [${t.estado}] ${t.descripcion}`).join('\n')}` : '';
-  const raw = await callLLM(`Redactor actas. TIPO:${ctx[modo]||ctx.notas}\nDATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}\nCONTENIDO:${input}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: solo explícitas+concretas, NO duplicar anteriores, IDs numéricos: 001, 002......, máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');
+  const raw = await callLLM(`Redactor actas. TIPO:${ctx[modo]||ctx.notas}\nDATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}\nCONTENIDO:${input}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: solo explícitas+concretas, NO duplicar anteriores, IDs tarea_001/002..., máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');
   const p = parseJSON(raw);
   if (p?.tareas_nuevas) p.tareas_nuevas = p.tareas_nuevas.map((t,i) => ({...t, id: fmtId(i+1)}));
   return p;
 };
 
-// ─── Finalizar reunión ────────────────────────────────────────────────────────
+// =============================================================================
+// FINALIZACION DE REUNION
+// Se ejecuta de forma asincrona al recibir /endMeeting.
+// Flujo: esperar chunks pendientes -> esperar audios adjuntos -> generar
+// ultima seccion si quedo incompleta -> generar acta final -> guardar acta
+// y tareas en la BD -> marcar reunion como 'ended'.
+// Las tareas anteriores (de reunion vinculada) se copian con su estado actual.
+// Las tareas nuevas se insertan con todos los campos extendidos.
+// =============================================================================
 const finalizeMeeting = async mid => {
   const [[meet]] = await db.execute('SELECT cliente,proyecto,responsable,participantes,started_at,ended_at,linked_meeting_id FROM meetings WHERE id=?', [mid]);
   if (!meet) return;
@@ -679,7 +784,16 @@ const finalizeMeeting = async mid => {
   console.log(`[${mid}] ✅ ${td.length} tareas nuevas`);
 };
 
-// ─── Whisper ──────────────────────────────────────────────────────────────────
+// =============================================================================
+// TRANSCRIPCION DE AUDIO CON WHISPER
+// toMp3: convierte cualquier formato de audio a MP3 mono 16kHz con ffmpeg.
+// Esto reduce el tamaño del archivo y mejora la velocidad de transcripcion.
+// whisperPrompt: construye el contexto para Whisper con el nombre del proyecto,
+// participantes y terminologia tecnica para mejorar precision de transcripcion.
+// procChunk: procesa un chunk de grabacion en tiempo real. Maneja reintentos
+// automaticos ante rate limit (429) esperando 60 segundos antes de reintentar.
+// procAudio: transcribe un audio adjunto subido manualmente.
+// =============================================================================
 const toMp3 = async ip => {
   const op = ip.replace(/\.(webm|wav|m4a|ogg|mp4|aac|flac)$/i, '.mp3');
   try { await execFileAsync('ffmpeg', ['-y','-i',ip,'-vn','-ar','16000','-ac','1','-b:a','64k',op]); return op; }
@@ -745,9 +859,17 @@ const procAudio = async (aid, fp, mid, parts=[], cli='', proj='', term='') => {
   }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// RUTAS PÚBLICAS (sin autenticación)
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
+// RUTAS PUBLICAS — Sin autenticacion requerida
+// /health:         verificacion de estado del servidor.
+// /login:          autenticacion de usuarios internos, emite JWT de 8 horas.
+//                  Migra contrasenas SHA-256 legacy a bcrypt en primer login.
+// /client-login:   autenticacion del portal del cliente, emite JWT de 7 dias.
+// /auth/refresh:   renueva el JWT antes de que expire sin pedir contrasena.
+//                  DEBE estar antes de app.use(authMiddleware).
+// /client/actas:   lista actas del cliente autenticado (solo las de su empresa).
+// /client/actas/:mid/approve: el cliente aprueba el acta (operacion irreversible).
+// =============================================================================
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 // ─── Login ────────────────────────────────────────────────────────────────────
@@ -851,12 +973,19 @@ app.post('/client/actas/:mid/approve', clientAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// RUTAS PROTEGIDAS (requieren JWT válido)
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
+// A PARTIR DE AQUI TODAS LAS RUTAS REQUIEREN JWT VALIDO
+// app.use(authMiddleware) aplica la verificacion a todos los endpoints
+// que se definan despues de esta linea.
+// =============================================================================
 app.use(authMiddleware);
 
-// ─── Superadmin: empresas ─────────────────────────────────────────────────────
+// =============================================================================
+// ADMINISTRACION DE EMPRESAS (solo superadmin)
+// El superadmin puede crear nuevas empresas con su primer usuario admin,
+// listar todas las empresas con estadisticas, y activar o desactivar empresas.
+// Cada empresa es un tenant independiente: sus datos no son visibles para otras.
+// =============================================================================
 app.get('/superadmin/companies', requireRole('superadmin'), async (req, res) => {
   try {
     const [r] = await db.execute(`SELECT c.*,COUNT(DISTINCT u.id) as user_count,COUNT(DISTINCT m.id) as meeting_count FROM companies c LEFT JOIN users u ON u.company_id=c.id LEFT JOIN meetings m ON m.company_id=c.id GROUP BY c.id ORDER BY c.name`);
@@ -885,7 +1014,12 @@ app.put('/superadmin/companies/:id', requireRole('superadmin'), async (req, res)
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Admin: usuarios ──────────────────────────────────────────────────────────
+// =============================================================================
+// ADMINISTRACION DE USUARIOS
+// Solo admin y superadmin pueden gestionar usuarios.
+// Cada admin solo puede ver y modificar usuarios de su propia empresa.
+// Un usuario no puede eliminarse a si mismo para evitar quedarse sin acceso.
+// =============================================================================
 app.get('/admin/users', requireRole('superadmin','admin'), async (req, res) => {
   try {
     const cid = req.user.role==='superadmin' ? (req.query.company_id||req.user.company_id) : req.user.company_id;
@@ -924,7 +1058,12 @@ app.delete('/admin/users/:id', requireRole('superadmin','admin'), async (req, re
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Admin: clientes portal ───────────────────────────────────────────────────
+// =============================================================================
+// ADMINISTRACION DE CLIENTES DEL PORTAL
+// Los clientes son personas externas (no usuarios del sistema) que tienen
+// acceso al portal para revisar y aprobar actas de sus proyectos.
+// Se identifican por el campo 'cliente' de las reuniones.
+// =============================================================================
 app.get('/admin/clients', requireRole('superadmin','admin'), async (req, res) => {
   try {
     const [r] = await db.execute(
@@ -964,7 +1103,13 @@ app.delete('/admin/clients/:id', requireRole('superadmin','admin'), async (req, 
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Usuarios para invitar ────────────────────────────────────────────────────
+// =============================================================================
+// UTILIDADES DE USUARIOS
+// for-invite:  lista usuarios disponibles para invitar a una reunion
+//              (excluye al creador que ya tiene acceso como propietario).
+// company:     lista todos los usuarios activos para selects de responsable
+//              y asignado_a en las tareas.
+// =============================================================================
 app.get('/admin/users/for-invite', async (req, res) => {
   try {
     const [r] = await db.execute('SELECT id,name,email FROM users WHERE company_id=? AND active=1 AND id!=? ORDER BY name', [req.user.company_id, req.user.id]);
@@ -983,7 +1128,14 @@ app.get('/admin/users/company', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Excel tareas por reunión ─────────────────────────────────────────────────
+// =============================================================================
+// EXPORTACION DE TAREAS A CSV
+// Se genera con BOM UTF-8 para que Excel abra correctamente los caracteres
+// en espanol sin configuracion adicional.
+// /meetings/:id/tareas/excel: exporta las tareas de una reunion especifica.
+// /tareas/excel:              exporta todas las tareas de todas las reuniones
+//                             de la empresa del usuario autenticado.
+// =============================================================================
 app.get('/meetings/:id/tareas/excel', async (req, res) => {
   try {
     if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
@@ -1041,7 +1193,22 @@ app.get('/tareas/excel', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Reuniones ────────────────────────────────────────────────────────────────
+// =============================================================================
+// GESTION DE REUNIONES
+// /startMeeting:      inicia una reunion de grabacion, crea el directorio de
+//                     almacenamiento y registra usuarios invitados.
+// /endMeeting:        finaliza la reunion y lanza la generacion del acta en
+//                     background (no bloquea al usuario).
+// /chunk:             recibe un fragmento de audio de ~30s durante la grabacion.
+//                     La transcripcion se procesa de forma asincrona.
+// /meetings/:id/progress: el frontend hace polling aqui para mostrar el
+//                         progreso de procesamiento.
+// /meetings:          lista reuniones segun el rol: superadmin ve todo,
+//                     admin ve su empresa, member ve solo las suyas o invitado.
+// /meetings-for-link: lista reuniones anteriores para vincular y heredar tareas.
+// /meetings/:id/reprocess-acta: regenera el acta borrando la anterior.
+// /meetings/from-text: crea acta desde texto manual (notas, email, transcripcion).
+// =============================================================================
 app.post('/startMeeting', async (req, res) => {
   const mid = uuidv4();
   const { cliente='', proyecto='', responsable='', linked_meeting_id=null, terminology='', invited_user_ids=[] } = req.body;
@@ -1276,7 +1443,12 @@ app.post('/meetings/from-text', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Notas ────────────────────────────────────────────────────────────────────
+// =============================================================================
+// NOTAS DE REUNION
+// Texto libre que los participantes agregan durante o despues de la reunion.
+// Se incluyen automaticamente en el prompt del acta para enriquecer el contexto.
+// No se pueden agregar notas a reuniones con acta ya aprobada por el cliente.
+// =============================================================================
 app.get('/meetings/:id/notes', async (req, res) => {
   try {
     if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
@@ -1306,7 +1478,14 @@ app.delete('/meetings/:id/notes/:nid', async (req, res) => {
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Adjuntos ─────────────────────────────────────────────────────────────────
+// =============================================================================
+// ADJUNTOS
+// Soporta documentos (PDF, Word, imagenes) y audios adicionales.
+// Los audios se transcriben automaticamente con Whisper y su contenido
+// se incluye en el acta igual que las notas de texto.
+// La descarga usa fetch con header Authorization porque los enlaces directos
+// no envian el JWT y la ruta esta protegida con authMiddleware.
+// =============================================================================
 app.get('/meetings/:id/attachments', async (req, res) => {
   try {
     if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
@@ -1363,7 +1542,12 @@ app.get('/meetings/:id/attachments/:aid/download', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Arrancar ──────────────────────────────────────────────────────────────────
+// =============================================================================
+// ARRANQUE DEL SERVIDOR
+// initDB() crea la conexion, las tablas y el superadmin inicial.
+// Si la BD no esta disponible el proceso termina con exit(1) para que
+// PM2 lo reinicie automaticamente.
+// =============================================================================
 const PORT = process.env.PORT || 3000;
 initDB()
   .then(() => app.listen(PORT, () => console.log(`🚀 Puerto ${PORT} | CORS: ${allowedOrigins.join(', ')}`)))
