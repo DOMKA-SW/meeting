@@ -30,6 +30,7 @@ export function RecordingProvider({ children }) {
   const currentMeetingIdRef = useRef(null);
   const mimeTypeRef         = useRef(null);
   const chunkNumberRef      = useRef(0);
+  const stopMeetingRef      = useRef(null);
 
   const clearIntervals = useCallback(() => {
     [intervalRef, durationIntervalRef, progressIntervalRef].forEach(ref => {
@@ -241,7 +242,7 @@ export function RecordingProvider({ children }) {
       intervalRef.current = setInterval(rotateChunk, CHUNK_INTERVAL_MS);
       durationIntervalRef.current = setInterval(() => {
         setDuration(prev => {
-          if (prev >= 10 * 3600) { stopMeeting(); return prev; }
+          if (prev >= 10 * 3600) { stopMeetingRef.current?.(); return prev; }
           return prev + 1;
         });
       }, 1000);
@@ -259,7 +260,7 @@ export function RecordingProvider({ children }) {
   const resetMeetingForm = useCallback(() => {
     setForm({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'' });
     setMeetingId(null);
-    setStatus('idle');
+    setIsRecording(false);
   }, []);
 
   const stopMeeting = useCallback(async () => {
@@ -289,6 +290,8 @@ export function RecordingProvider({ children }) {
     currentMeetingIdRef.current = null; mimeTypeRef.current = null;
     return mid;
   }, [clearIntervals, sendChunk]);
+
+  stopMeetingRef.current = stopMeeting;
 
   return (
     <RecordingContext.Provider value={{
