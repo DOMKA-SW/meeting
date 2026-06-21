@@ -297,7 +297,7 @@ export function RecordingProvider({ children }) {
     <RecordingContext.Provider value={{
       isRecording, meetingId, form, setForm, duration, chunkNumber,
       progress, statusMsg, errorMsg, setErrorMsg, audioSource,
-      startMeeting, stopMeeting
+      startMeeting, stopMeeting, resetMeetingForm
     }}>
       {children}
     </RecordingContext.Provider>
