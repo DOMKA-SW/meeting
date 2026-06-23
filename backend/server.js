@@ -1358,6 +1358,26 @@ app.post('/startMeeting', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Ruta exclusiva para admin/superadmin: cerrar una reunion que quedo atascada.
+// Util cuando el usuario cerro el navegador sin terminar la grabacion,
+// o cuando una reunion lleva mas de N minutos activa sin actividad.
+// Genera el acta con lo que haya transcrito hasta ese momento.
+app.post('/admin/meetings/:id/force-end', requireRole('superadmin', 'admin'), async (req, res) => {
+  try {
+    const [[m]] = await db.execute('SELECT id,status,company_id FROM meetings WHERE id=?', [req.params.id]);
+    if (!m) return res.status(404).json({ error: 'Reunion no encontrada' });
+    if (m.status === 'ended') return res.status(400).json({ error: 'La reunion ya estaba cerrada' });
+    // Verificar que pertenece a la empresa del admin
+    if (req.user.role !== 'superadmin' && m.company_id !== req.user.company_id) {
+      return res.status(403).json({ error: 'Sin acceso' });
+    }
+    await db.execute("UPDATE meetings SET status='ended', ended_at=? WHERE id=?", [new Date(), req.params.id]);
+    res.json({ ok: true, message: 'Reunion cerrada. Generando acta...' });
+    // Generar acta con lo que haya
+    finalizeMeeting(req.params.id).catch(e => console.error('force-end finalizeMeeting:', e.message));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/endMeeting', async (req, res) => {
   const { meetingId } = req.body;
   if (!meetingId) return res.status(400).json({ error: 'Missing meetingId' });
