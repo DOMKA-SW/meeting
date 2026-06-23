@@ -810,12 +810,16 @@ const toMp3 = async ip => {
   catch(e) { console.error('ffmpeg:', e.message); return null; }
 };
 const whisperPrompt = (parts, cli, proj, term) => {
-  const p = ['Reunión de trabajo en español.'];
-  if (cli||proj) p.push(`Empresa/proyecto: ${[cli,proj].filter(Boolean).join(' — ')}.`);
-  if (parts.length) p.push(`Participantes: ${parts.join(', ')}.`);
-  if (term) p.push(`Términos: ${term}.`);
-  p.push('Transcribe en español. No traduzcas. Mantén nombres propios.');
-  return p.join(' ');
+  // El prompt de Whisper debe ser solo CONTEXTO, no instrucciones.
+  // Whisper interpreta el prompt como el inicio de la transcripcion,
+  // por lo que si contiene frases como "Transcribe en español" las reproduce
+  // literalmente en la salida. Solo se pasan nombres y terminos clave.
+  const p = [];
+  if (cli || proj) p.push([cli, proj].filter(Boolean).join(', '));
+  if (parts.length) p.push(parts.join(', '));
+  if (term) p.push(term);
+  // Si no hay contexto, dejar el prompt vacio para evitar repeticion de ruido
+  return p.join('. ');
 };
 
 const procChunk = async (fp, mid, cn, parts=[], cli='', proj='', term='') => {
