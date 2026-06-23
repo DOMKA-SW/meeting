@@ -403,18 +403,35 @@ const upload = multer({
 // FUNCIONES AUXILIARES
 // sleep:       pausa para reintentos ante rate limit.
 // addBizDays:  calcula fechas de compromiso en dias habiles (lunes-viernes).
-// fmtId:       formatea el numero de tarea como string: 1 -> "tarea_001".
+// fmtId:       formatea el numero de tarea como string: 1 -> "001".
 // parseJSON:   parsea respuestas del LLM tolerando texto extra antes/despues del JSON.
 // dedup:       elimina tareas duplicadas o muy vagas de la lista generada por el LLM.
 // isMeetingApproved / canAccess: control de acceso y estado de aprobacion.
 // =============================================================================
 const sleep      = ms => new Promise(r => setTimeout(r, ms));
+
+// Lista de frases que Whisper genera como "ruido" cuando no hay voz clara
+// o cuando capta sonido ambiental, silencio, o su propio prompt de contexto.
+// Estas lineas se filtran antes de guardar en BD y antes de pasarlas al LLM.
+const WHISPER_NOISE = [
+  'transcribe en español', 'no traduzcas', 'mantén nombres propios',
+  'mantén nombres', 'subtítulos realizados', 'amara.org', 'gracias por ver',
+  'gracias por participar', 'reuniones de trabajo en español',
+  'reunión de trabajo en español', 'para participar en nuestros',
+  'www.patreon.com', 'www.youtube.com', 'escríbeme su nombre',
+  'escríbeme sus nombres', 'mantengan nombres', 'manténganlos propios',
+];
+const isNoiseLine = text => {
+  const t = (text || '').toLowerCase().trim();
+  if (t.length < 4) return true;
+  return WHISPER_NOISE.some(n => t.includes(n));
+};
 const addBizDays = (start, days) => {
   const d = new Date(start); let added = 0;
   while (added < days) { d.setDate(d.getDate()+1); if (d.getDay()!==0 && d.getDay()!==6) added++; }
   return d.toISOString().split('T')[0];
 };
-const fmtId    = n => `tarea_${String(n).padStart(3,'0')}`;
+const fmtId    = n => String(n).padStart(3,'0');  // IDs numericos: 001, 002, 003
 const callLLM = async (prompt, model = LLM_MODEL, retries = 3) => {
   const client    = (AI_PROVIDER === 'openai' && openaiClient) ? openaiClient : groq;
   const useModel  = (model === 'llama-3.3-70b-versatile' || model === 'llama-3.1-8b-instant')
@@ -517,13 +534,16 @@ const suppBlock = (notes, audios) => {
 };
 
 const dedup = tareas => {
-  const s = new Set();
+  // Solo elimina tareas completamente vacias o duplicados exactos.
+  // Filtro minimo para no perder tareas validas del LLM.
+  const seen = new Set();
   return tareas.filter(t => {
-    const d = (t.descripcion||t.tarea||'').trim().toLowerCase();
-    if (!d || d.length < 8) return false;
-    const k = d.replace(/\b(el|la|los|las|un|una|de|del|al|y|o|en|que|se|por|con|para)\b/g,'').replace(/\s+/g,' ').trim().slice(0,40);
-    if (s.has(k)) return false;
-    s.add(k); return true;
+    const d = (t.descripcion || t.tarea || t.asunto || '').trim();
+    if (!d || d.length < 5) return false;
+    const key = d.toLowerCase().slice(0, 60);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 };
 
@@ -619,33 +639,73 @@ const checkSection = async mid => {
 // resumen_reunion y observaciones_generales.
 // =============================================================================
 const buildActaPrompt = (meta, sectionInputs, allTareasBruto, tareasAnt, suppBlk, hasSup, fechaDef) => [
-  'Eres un redactor experto en actas corporativas en español latinoamericano.',
-  'Genera un acta COMPLETA y DETALLADA. No omitas tareas ni decisiones mencionadas.',
+  '=== ROL ===',
+  'Eres un redactor senior de actas corporativas en español latinoamericano.',
+  'Tu objetivo: generar un acta ejecutiva profesional, completa y accionable.',
   '',
-  `REUNIÓN: ${meta.cliente} — ${meta.proyecto} | ${meta.fecha} | ${meta.hora_inicio}–${meta.hora_fin}`,
-  `Responsable: ${meta.responsable} | Participantes: ${(meta.participantes||[]).join(', ')}`,
+  '=== DATOS DE LA REUNION ===',
+  `Cliente: ${meta.cliente} | Proyecto: ${meta.proyecto}`,
+  `Fecha: ${meta.fecha} | Inicio: ${meta.hora_inicio} | Fin: ${meta.hora_fin}`,
+  `Responsable: ${meta.responsable}`,
+  `Participantes: ${(meta.participantes || []).join(', ')}`,
   '',
-  tareasAnt.length ? `TAREAS ANTERIORES (NO incluir en nuevas):\n${tareasAnt.map(t=>`  [${t.estado.toUpperCase()}] ${t.descripcion} — ${t.responsable||'—'}`).join('\n')}` : '',
-  'CONTENIDO DE LA REUNIÓN:', sectionInputs, suppBlk,
-  'TAREAS PRE-DETECTADAS (consolida y amplía, NO omitas ninguna):', JSON.stringify(allTareasBruto,null,2),
-  '━━ INSTRUCCIONES ━━',
-  '"resumen_reunion": 5-8 frases ejecutivas. 1.Objetivo 2.Temas 3.Decisiones (con nombres) 4.Próximos pasos.',
-  hasSup ? 'Integra información de notas y audios adjuntos.' : '',
-  '"tareas_nuevas": EXTRAE TODAS las tareas concretas. Sé exhaustivo.',
-  '  ✅ VÁLIDAS: acción + objeto específico. Compromisos implícitos del contexto.',
-  '  ❌ INVÁLIDAS: "Revisar" | "Hacer seguimiento" | "Ver el tema" | "Coordinar"',
-  '  - asunto: título corto máx 8 palabras',
-  '  - detalle: descripción ampliada con todo el contexto',
-  '  - responsable: nombre si se mencionó',
-  `  - fecha_compromiso: días hábiles desde ${fechaDef}. Default: ${fechaDef}`,
-  '  - prioridad: 3=Alta si es urgente/bloqueante, 2=Media, 1=Baja',
-  '  - tipo_tarea: "e" si involucra cliente/externo, "i" si es interna',
-  '  - Sin límite de tareas. IDs: tarea_001, tarea_002...',
-  `"tareas_anteriores": ${tareasAnt.length ? `Incluye las ${tareasAnt.length} anteriores con estado actualizado` : '[]'}`,
-  '"observaciones_generales": Riesgos, dependencias, acuerdos importantes.',
-  'FORMATO — JSON válido sin texto antes ni después:',
-  `{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","asunto":"","detalle":"","responsable":"","fecha_compromiso":"${fechaDef}","prioridad":2,"tipo_tarea":"i"}],"resumen_reunion":"","observaciones_generales":""}`,
-  'SOLO JSON VÁLIDO.',
+  tareasAnt.length
+    ? `=== TAREAS DE REUNION ANTERIOR (NO repetir en tareas_nuevas) ===\n${tareasAnt.map(t => `  [${t.estado.toUpperCase()}] ${t.descripcion} — ${t.responsable || 'sin asignar'}`).join('\n')}`
+    : '',
+  '',
+  '=== CONTENIDO DE LA REUNION ===',
+  sectionInputs,
+  suppBlk,
+  '',
+  '=== TAREAS YA DETECTADAS (consolidar, ampliar, no omitir) ===',
+  JSON.stringify(allTareasBruto, null, 2),
+  '',
+  '=== INSTRUCCIONES ===',
+  '',
+  '--- resumen_reunion ---',
+  'Prosa ejecutiva de 5 a 8 frases con esta estructura:',
+  '  1. Objetivo principal de la reunion.',
+  '  2. Temas especificos tratados.',
+  '  3. Decisiones tomadas — indica quien decidio.',
+  '  4. Acuerdos alcanzados.',
+  '  5. Proximos pasos generales del equipo.',
+  'Tono formal. Tercera persona. Sin bullets. Solo prosa continua.',
+  hasSup ? 'Integra la informacion de notas y audios adjuntos en el resumen.' : '',
+  '',
+  '--- tareas_nuevas ---',
+  'Extrae TODAS las tareas concretas. Se exhaustivo, no omitas ninguna.',
+  '',
+  'INCLUIR: accion especifica + objeto identificable.',
+  '  OK: "Enviar el contrato al cliente antes del viernes"',
+  '  OK: "Actualizar el tablero de validacion con datos de mayo"',
+  '  OK: "Ricardo revisara los numeros de distribuidor por distribuidor"',
+  '',
+  'DESCARTAR: vagas o sin objeto claro.',
+  '  NO: "Revisar" / "Coordinar" / "Hacer seguimiento" / "Ver el tema"',
+  '',
+  'Campos obligatorios por tarea:',
+  '  - descripcion: la accion completa en una oracion clara',
+  '  - asunto: titulo de maximo 8 palabras que identifique la tarea',
+  '  - detalle: contexto completo — que se discutio, por que importa,',
+  '             datos especificos mencionados en la reunion',
+  '  - responsable: nombre exacto si se menciono, vacio si no',
+  `  - fecha_compromiso: dias habiles desde ${fechaDef}. Usar fecha especifica si se menciono.`,
+  '  - prioridad: 3=Alta si es urgente o bloquea otras tareas, 2=Media, 1=Baja',
+  '  - tipo_tarea: "e" si involucra cliente o externos, "i" si es interna',
+  '  - IDs: 001, 002, 003... Sin limite de cantidad.',
+  '',
+  `--- tareas_anteriores ---`,
+  tareasAnt.length
+    ? `Incluye las ${tareasAnt.length} tareas anteriores. Actualiza el estado si se menciono avance.`
+    : 'Array vacio []',
+  '',
+  '--- observaciones_generales ---',
+  'Riesgos, dependencias entre tareas, acuerdos de contexto, informacion',
+  'relevante que no es tarea pero impacta el proyecto. Vacio si no hay nada.',
+  '',
+  '=== FORMATO ===',
+  'SOLO JSON valido. Sin texto antes ni despues. Sin markdown.',
+  `{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"001","descripcion":"","asunto":"","detalle":"","responsable":"","fecha_compromiso":"${fechaDef}","prioridad":2,"tipo_tarea":"i"}],"resumen_reunion":"","observaciones_generales":""}`,
 ].join('\n');
 
 const genActa = async (mid, meta, fechaDef, tareasAnt=[]) => {
@@ -692,7 +752,32 @@ const genActa = async (mid, meta, fechaDef, tareasAnt=[]) => {
       const antStr   = tareasAnt.length ? `\nTAREAS ANTERIORES:\n${tareasAnt.map(t=>`• [${t.estado}] ${t.descripcion}`).join('\n')}` : '';
       const notasStr = tareasDeNotas.length > 0 ? `\nTAREAS DETECTADAS EN NOTAS ADICIONALES (inclúyelas si son concretas):\n${tareasDeNotas.map(t=>`• ${t.descripcion}${t.responsable?' ('+t.responsable+')':''}`).join('\n')}` : '';
       try {
-        const raw = await callLLM(`Genera acta. DATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}${notasStr}\nTRANSCRIPCIÓN:${tscr}${sb}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: tareas explícitas, NO duplicar anteriores, IDs tarea_001/002..., máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');
+        const rawPrompt = [
+          'Redactor senior de actas en español. Genera acta completa y accionable.',
+          '',
+          `Cliente: ${meta.cliente} | Proyecto: ${meta.proyecto}`,
+          `Fecha: ${meta.fecha} | Responsable: ${meta.responsable}`,
+          `Participantes: ${(meta.participantes||[]).join(', ')}`,
+          antStr,
+          notasStr,
+          '',
+          'TRANSCRIPCION:',
+          tscr,
+          sb,
+          '',
+          'INSTRUCCIONES:',
+          'resumen_reunion: 5-6 frases. Objetivo, temas tratados, decisiones tomadas, proximos pasos.',
+          'tareas_nuevas: extrae TODAS las tareas concretas sin excepcion.',
+          '  Incluir: accion+objeto especifico. Excluir: vagas sin objeto.',
+          '  Por cada tarea: descripcion clara, asunto corto, detalle con contexto,',
+          `  responsable, fecha_compromiso en dias habiles desde ${fechaDef}, prioridad (3=Alta 2=Media 1=Baja), tipo_tarea (i=interna e=externa).`,
+          '  IDs numericos: 001, 002, 003... Sin limite de tareas.',
+          'observaciones_generales: riesgos, dependencias, acuerdos relevantes.',
+          '',
+          'FORMATO - SOLO JSON valido:',
+          `{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"001","descripcion":"","asunto":"","detalle":"","responsable":"","fecha_compromiso":"${fechaDef}","prioridad":2,"tipo_tarea":"i"}],"resumen_reunion":"","observaciones_generales":""}`,
+        ].join('\n');
+        const raw = await callLLM(rawPrompt, 'llama-3.3-70b-versatile');
         actaJson = parseJSON(raw);
       } catch(e) { console.error('genActa raw:', e.message); }
     }
@@ -719,7 +804,34 @@ const genActaText = async (texto, modo, meta, fechaDef, tareasAnt=[]) => {
   }
   const ctx    = { notas:'NOTAS LIBRES.', transcripcion:'TRANSCRIPCIÓN con diálogos.', email:'EMAIL resumen.' };
   const antStr = tareasAnt.length ? `\nTAREAS ANTERIORES:\n${tareasAnt.map(t=>`• [${t.estado}] ${t.descripcion}`).join('\n')}` : '';
-  const raw = await callLLM(`Redactor actas. TIPO:${ctx[modo]||ctx.notas}\nDATOS:cliente="${meta.cliente}",proyecto="${meta.proyecto}",responsable="${meta.responsable}",participantes=${JSON.stringify(meta.participantes)},fecha="${meta.fecha}",hora_inicio="${meta.hora_inicio}",hora_fin="${meta.hora_fin}"${antStr}\nCONTENIDO:${input}\nJSON:{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"tarea_001","descripcion":"","responsable":"","fecha_compromiso":"${fechaDef}"}],"resumen_reunion":"4-6 frases prosa ejecutiva","observaciones_generales":""}\nREGLAS: solo explícitas+concretas, NO duplicar anteriores, IDs tarea_001/002..., máx 15. SOLO JSON.`,'llama-3.3-70b-versatile');
+  const prompt5 = [
+    '=== ROL ===',
+    'Redactor senior de actas corporativas en español latinoamericano.',
+    `Tipo de entrada: ${ctx[modo] || ctx.notas}`,
+    '',
+    '=== DATOS ===',
+    `Cliente: ${meta.cliente} | Proyecto: ${meta.proyecto}`,
+    `Fecha: ${meta.fecha} | Inicio: ${meta.hora_inicio} | Fin: ${meta.hora_fin}`,
+    `Responsable: ${meta.responsable} | Participantes: ${meta.participantes.join(', ')}`,
+    antStr,
+    '',
+    '=== CONTENIDO ===',
+    input,
+    '',
+    '=== INSTRUCCIONES ===',
+    'resumen_reunion: prosa 5-8 frases. Objetivo, temas, decisiones con nombres, proximos pasos.',
+    'tareas_nuevas: TODAS las concretas. descripcion+asunto+detalle+responsable+fecha+prioridad+tipo.',
+    '  detalle: contexto completo de lo discutido sobre cada tarea.',
+    '  VALIDAS: accion+objeto especifico. INVALIDAS: "Revisar"/"Coordinar"/"Ver el tema".',
+    `  fecha: dias habiles desde ${fechaDef}. prioridad: 3=Alta 2=Media 1=Baja. tipo: e=externa i=interna.`,
+    '  IDs: 001, 002... Sin limite.',
+    'observaciones_generales: riesgos, dependencias, acuerdos relevantes.',
+    '',
+    '=== FORMATO ===',
+    'SOLO JSON valido. Sin texto ni markdown.',
+    `{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"001","descripcion":"","asunto":"","detalle":"","responsable":"","fecha_compromiso":"${fechaDef}","prioridad":2,"tipo_tarea":"i"}],"resumen_reunion":"","observaciones_generales":""}`,
+  ].join('\n');
+  const raw = await callLLM(prompt5, 'llama-3.3-70b-versatile');
   const p = parseJSON(raw);
   if (p?.tareas_nuevas) p.tareas_nuevas = p.tareas_nuevas.map((t,i) => ({...t, id: fmtId(i+1)}));
   return p;
@@ -791,7 +903,10 @@ const finalizeMeeting = async mid => {
       ]);
   }
   await db.execute("UPDATE meetings SET status='ended' WHERE id=?", [mid]);
-  console.log(`[${mid}] ✅ ${td.length} tareas nuevas`);
+  console.log(`[${mid}] tareas_nuevas del LLM: ${(actaJson.tareas_nuevas||[]).length} | despues de dedup: ${td.length}`);
+  if ((actaJson.tareas_nuevas||[]).length > 0 && td.length === 0) {
+    console.warn(`[${mid}] ATENCION: dedup elimino todas las tareas. Revisar contenido.`);
+  }
 };
 
 // =============================================================================
@@ -810,16 +925,23 @@ const toMp3 = async ip => {
   catch(e) { console.error('ffmpeg:', e.message); return null; }
 };
 const whisperPrompt = (parts, cli, proj, term) => {
-  // El prompt de Whisper debe ser solo CONTEXTO, no instrucciones.
-  // Whisper interpreta el prompt como el inicio de la transcripcion,
-  // por lo que si contiene frases como "Transcribe en español" las reproduce
-  // literalmente en la salida. Solo se pasan nombres y terminos clave.
-  const p = [];
-  if (cli || proj) p.push([cli, proj].filter(Boolean).join(', '));
-  if (parts.length) p.push(parts.join(', '));
-  if (term) p.push(term);
-  // Si no hay contexto, dejar el prompt vacio para evitar repeticion de ruido
-  return p.join('. ');
+  // IMPORTANTE: El prompt de Whisper NO son instrucciones — es el inicio
+  // simulado de la conversacion. Whisper lo usa para calibrar el vocabulario
+  // y nombres esperados. Si incluye frases como "Transcribe en español",
+  // el modelo las reproduce literalmente en la transcripcion.
+  // La estrategia correcta es simular como empezaria el acta: fecha, proyecto,
+  // participantes — texto natural que Whisper reconoce como contexto.
+  const parts_str = parts.length ? parts.join(', ') : '';
+  const ctx_str   = [cli, proj].filter(Boolean).join(' - ');
+  const term_str  = term || '';
+
+  // Construir un "inicio de conversacion" natural que calibre a Whisper
+  // sin que lo reproduzca como texto de la reunion
+  const lines = [];
+  if (ctx_str)   lines.push(ctx_str);
+  if (parts_str) lines.push(parts_str);
+  if (term_str)  lines.push(term_str);
+  return lines.join('. ');
 };
 
 const procChunk = async (fp, mid, cn, parts=[], cli='', proj='', term='') => {
@@ -832,8 +954,8 @@ const procChunk = async (fp, mid, cn, parts=[], cli='', proj='', term='') => {
     const segs = Array.isArray(tr.segments) ? tr.segments : [];
     if (segs.length > 0) {
       let sc = 1; const sm = {};
-      for (const s of segs) { const k = s.spk||s.speaker||'sp'; if (!sm[k]) sm[k] = `Speaker${sc++}`; if ((s.text||'').trim()) await db.execute('INSERT INTO transcriptions (meeting_id,chunk_number,speaker,text,timestamp) VALUES (?,?,?,?,?)', [mid, cn, sm[k], s.text.trim(), new Date()]); }
-    } else if (tr.text?.trim()) {
+      for (const s of segs) { const k = s.spk||s.speaker||'sp'; if (!sm[k]) sm[k] = `Speaker${sc++}`; const txt = (s.text||'').trim(); if (txt && !isNoiseLine(txt)) await db.execute('INSERT INTO transcriptions (meeting_id,chunk_number,speaker,text,timestamp) VALUES (?,?,?,?,?)', [mid, cn, sm[k], txt, new Date()]); }
+    } else if (tr.text?.trim() && !isNoiseLine(tr.text)) {
       await db.execute('INSERT INTO transcriptions (meeting_id,chunk_number,speaker,text,timestamp) VALUES (?,?,?,?,?)', [mid, cn, 'Speaker1', tr.text.trim(), new Date()]);
     }
     if (mp && fs.existsSync(mp)) fs.unlinkSync(mp);
