@@ -1867,6 +1867,7 @@ app.get('/meetings/:id/attachments/:aid/download', async (req, res) => {
 // Si la BD no esta disponible el proceso termina con exit(1) para que
 // PM2 lo reinicie automaticamente.
 // =============================================================================
+
 const PORT = process.env.PORT || 3000;
 initDB()
   .then(() => app.listen(PORT, () => console.log(`🚀 Puerto ${PORT} | CORS: ${allowedOrigins.join(', ')}`)))
