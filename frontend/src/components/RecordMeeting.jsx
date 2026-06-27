@@ -59,11 +59,18 @@ export default function RecordMeeting() {
   }, []);
   const {
     isRecording, form, setForm, duration, chunkNumber, progress,
-    statusMsg, errorMsg, setErrorMsg, audioSource, startMeeting, stopMeeting, resetMeetingForm
+    statusMsg, errorMsg, setErrorMsg, audioSource,
+    recordMode, uploadingVideo,
+    startMeeting, stopMeeting, resetMeetingForm
   } = useRecording();
 
-  const handleStart = async () => { setErrorMsg(''); await startMeeting(); };
-  const handleStop  = async () => { const mid = await stopMeeting(); if (mid) { resetMeetingForm(); navigate('/meetings'); } };
+  const [selectedMode, setSelectedMode] = useState('audio'); // 'audio' | 'video'
+
+  const handleStart = async () => { setErrorMsg(''); await startMeeting(selectedMode); };
+  const handleStop  = async () => {
+    const mid = await stopMeeting();
+    if (mid) { resetMeetingForm(); navigate('/meetings'); }
+  };
 
   const seccPct = ((chunkNumber % 12) / 12) * 100;
   const seccNum = Math.floor(chunkNumber / 12);
@@ -150,9 +157,33 @@ export default function RecordMeeting() {
             </ol>
           </div>
 
+          {/* Selector de modo: solo audio o video+audio */}
+          <div style={{ marginBottom:16 }}>
+            <p style={{ fontSize:13, fontWeight:600, color:'#444', marginBottom:10 }}>Modo de grabación</p>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+              <button type="button" onClick={() => setSelectedMode('audio')}
+                style={{ padding:'14px 12px', borderRadius:8, border:`2px solid ${selectedMode==='audio'?'#1565C0':'#e0e0e0'}`, backgroundColor:selectedMode==='audio'?'#EFF6FF':'white', cursor:'pointer', textAlign:'left' }}>
+                <div style={{ fontSize:22, marginBottom:4 }}>🎙️</div>
+                <div style={{ fontSize:13, fontWeight:700, color: selectedMode==='audio'?'#1565C0':'#333' }}>Solo Audio</div>
+                <div style={{ fontSize:11, color:'#888', marginTop:2 }}>Liviano · Recomendado para reuniones largas</div>
+              </button>
+              <button type="button" onClick={() => setSelectedMode('video')}
+                style={{ padding:'14px 12px', borderRadius:8, border:`2px solid ${selectedMode==='video'?'#7c3aed':'#e0e0e0'}`, backgroundColor:selectedMode==='video'?'#F5F3FF':'white', cursor:'pointer', textAlign:'left' }}>
+                <div style={{ fontSize:22, marginBottom:4 }}>🎬</div>
+                <div style={{ fontSize:13, fontWeight:700, color: selectedMode==='video'?'#7c3aed':'#333' }}>Video + Audio</div>
+                <div style={{ fontSize:11, color:'#888', marginTop:2 }}>Graba la pantalla · Útil para revisión posterior</div>
+              </button>
+            </div>
+            {selectedMode==='video' && (
+              <div style={{ marginTop:8, padding:'8px 12px', backgroundColor:'#FFF3E0', borderRadius:6, fontSize:12, color:'#E65100' }}>
+                El video se guarda al finalizar la reunión. Reuniones largas pueden generar archivos grandes.
+              </div>
+            )}
+          </div>
+
           <button onClick={handleStart}
-            style={{ padding:'14px 28px', fontSize:16, backgroundColor:'#16a34a', color:'white', border:'none', borderRadius:8, cursor:'pointer', fontWeight:700, width:'100%' }}>
-            ▶ Iniciar Grabación
+            style={{ padding:'14px 28px', fontSize:16, backgroundColor: selectedMode==='video'?'#7c3aed':'#16a34a', color:'white', border:'none', borderRadius:8, cursor:'pointer', fontWeight:700, width:'100%' }}>
+            {selectedMode==='video' ? '🎬 Iniciar Grabación con Video' : '▶ Iniciar Grabación'}
           </button>
         </>
       )}
@@ -166,6 +197,11 @@ export default function RecordMeeting() {
               <span style={{ fontSize:13, color:'#64748b', backgroundColor:'#1e293b', padding:'3px 10px', borderRadius:20 }}>
                 {audioSource === 'mixed' ? '🎙️+🖥️ sistema+mic' : audioSource === 'system' ? '🖥️ sistema' : '🎤 micrófono'}
               </span>
+              {recordMode === 'video' && (
+                <span style={{ fontSize:11, color:'#a78bfa', backgroundColor:'#1e293b', padding:'3px 10px', borderRadius:20 }}>
+                  🎬 Video ON
+                </span>
+              )}
             </div>
 
             <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:14 }}>
@@ -194,9 +230,15 @@ export default function RecordMeeting() {
             ✅ Puedes navegar libremente. La grabación continúa. Solo "Finalizar" la detiene.
           </div>
 
-          <button onClick={handleStop}
-            style={{ padding:'14px 28px', fontSize:16, backgroundColor:'#dc2626', color:'white', border:'none', borderRadius:8, cursor:'pointer', fontWeight:700, width:'100%' }}>
-            ⏹ Finalizar Reunión
+          {uploadingVideo && (
+            <div style={{ marginBottom:12, padding:'12px 16px', backgroundColor:'#F3E8FF', borderRadius:8, fontSize:13, color:'#7c3aed', border:'1px solid #DDD6FE', textAlign:'center' }}>
+              Subiendo video de la reunión... Espera un momento antes de cerrar el navegador.
+            </div>
+          )}
+
+          <button onClick={handleStop} disabled={uploadingVideo}
+            style={{ padding:'14px 28px', fontSize:16, backgroundColor: uploadingVideo?'#9ca3af':'#dc2626', color:'white', border:'none', borderRadius:8, cursor: uploadingVideo?'default':'pointer', fontWeight:700, width:'100%' }}>
+            {uploadingVideo ? 'Subiendo video...' : '⏹ Finalizar Reunión'}
           </button>
 
           <style>{`@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.5;transform:scale(0.85)}}`}</style>
