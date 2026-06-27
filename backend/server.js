@@ -323,6 +323,16 @@ const createTables = async () => {
     transcription LONGTEXT, transcription_status VARCHAR(20) DEFAULT 'pending',
     uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 
+  // Grabaciones de video de reuniones
+  await db.execute(`CREATE TABLE IF NOT EXISTS recordings (
+    id           INT AUTO_INCREMENT PRIMARY KEY,
+    meeting_id   VARCHAR(36)  NOT NULL UNIQUE,
+    file_path    VARCHAR(500) NOT NULL,
+    file_size    BIGINT       DEFAULT 0,
+    mime_type    VARCHAR(50)  DEFAULT 'video/webm',
+    created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP
+  )`);
+
   // Ampliar columna password_hash si sigue en 64 chars (para bcrypt de 60 chars)
   try {
     await db.execute(`ALTER TABLE users MODIFY COLUMN password_hash VARCHAR(100) NOT NULL`);
@@ -1006,6 +1016,73 @@ const procAudio = async (aid, fp, mid, parts=[], cli='', proj='', term='') => {
 // /client/actas:   lista actas del cliente autenticado (solo las de su empresa).
 // /client/actas/:mid/approve: el cliente aprueba el acta (operacion irreversible).
 // =============================================================================
+// =============================================================================
+// GRABACION DE VIDEO
+// El video completo se sube en un solo blob al finalizar la reunion.
+// Se guarda en storage/recordings/ y se sirve con range requests para seek.
+// Solo visible para usuarios internos con acceso — clientes no lo ven.
+// =============================================================================
+
+app.post('/meetings/:id/recording', upload.single('video'), async (req, res) => {
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso' });
+    if (!req.file) return res.status(400).json({ error: 'No se recibio video' });
+    const recPath = path.join(storagePath, '..', 'recordings');
+    fs.mkdirSync(recPath, { recursive: true });
+    const fp = path.join(recPath, `${req.params.id}.webm`);
+    fs.writeFileSync(fp, req.file.buffer);
+    const size = req.file.buffer.length;
+    await db.execute(
+      'INSERT INTO recordings (meeting_id,file_path,file_size,mime_type) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE file_path=VALUES(file_path),file_size=VALUES(file_size)',
+      [req.params.id, fp, size, req.file.mimetype || 'video/webm']
+    );
+    console.log(`[${req.params.id}] Video guardado: ${(size/1024/1024).toFixed(1)}MB`);
+    res.json({ ok: true, size_mb: (size/1024/1024).toFixed(1) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/meetings/:id/recording/info', async (req, res) => {
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso' });
+    const [[r]] = await db.execute('SELECT file_size,mime_type,created_at FROM recordings WHERE meeting_id=?', [req.params.id]);
+    if (!r) return res.json({ exists: false });
+    res.json({ exists: true, size_mb: (r.file_size/1024/1024).toFixed(1), created_at: r.created_at });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Range requests permiten seek en el reproductor sin descargar el video completo
+app.get('/meetings/:id/recording/stream', async (req, res) => {
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso' });
+    const [[r]] = await db.execute('SELECT file_path,mime_type FROM recordings WHERE meeting_id=?', [req.params.id]);
+    if (!r || !fs.existsSync(r.file_path)) return res.status(404).json({ error: 'Video no encontrado' });
+    const stat  = fs.statSync(r.file_path);
+    const range = req.headers.range;
+    if (range) {
+      const [startStr, endStr] = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(startStr, 10);
+      const end   = endStr ? parseInt(endStr, 10) : stat.size - 1;
+      res.writeHead(206, {
+        'Content-Range':  `bytes ${start}-${end}/${stat.size}`,
+        'Accept-Ranges':  'bytes',
+        'Content-Length': end - start + 1,
+        'Content-Type':   r.mime_type || 'video/webm',
+      });
+      fs.createReadStream(r.file_path, { start, end }).pipe(res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': stat.size,
+        'Content-Type':   r.mime_type || 'video/webm',
+        'Accept-Ranges':  'bytes',
+      });
+      fs.createReadStream(r.file_path).pipe(res);
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 // ─── Login ────────────────────────────────────────────────────────────────────
