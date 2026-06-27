@@ -327,7 +327,7 @@ const createTables = async () => {
   await db.execute(`CREATE TABLE IF NOT EXISTS company_settings (
     id           INT AUTO_INCREMENT PRIMARY KEY,
     company_id   INT         NOT NULL UNIQUE,
-    prompt_context TEXT      DEFAULT '',
+    prompt_context TEXT,
     updated_at   DATETIME    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
   )`);
@@ -716,7 +716,7 @@ const buildActaPrompt = (meta, sectionInputs, allTareasBruto, tareasAnt, suppBlk
   '  - detalle: contexto completo — que se discutio, por que importa,',
   '             datos especificos mencionados en la reunion',
   '  - responsable: nombre exacto si se menciono, vacio si no',
-  `  - fecha_compromiso: dias habiles desde ${fechaDef}. Usar fecha especifica si se menciono.`,
+  `  - fecha_compromiso: SOLO una fecha en formato AAAA-MM-DD (dias habiles desde ${fechaDef}). NUNCA texto largo ni frases.`,
   '  - prioridad: 3=Alta si es urgente o bloquea otras tareas, 2=Media, 1=Baja',
   '  - tipo_tarea: "e" si involucra cliente o externos, "i" si es interna',
   '  - IDs: 001, 002, 003... Sin limite de cantidad.',
@@ -797,7 +797,7 @@ const genActa = async (mid, meta, fechaDef, tareasAnt=[]) => {
           'tareas_nuevas: extrae TODAS las tareas concretas sin excepcion.',
           '  Incluir: accion+objeto especifico. Excluir: vagas sin objeto.',
           '  Por cada tarea: descripcion clara, asunto corto, detalle con contexto,',
-          `  responsable, fecha_compromiso en dias habiles desde ${fechaDef}, prioridad (3=Alta 2=Media 1=Baja), tipo_tarea (i=interna e=externa).`,
+          `  responsable, fecha_compromiso SOLO en formato AAAA-MM-DD (dias habiles desde ${fechaDef}, NUNCA texto largo), prioridad (3=Alta 2=Media 1=Baja), tipo_tarea (i=interna e=externa).`,
           '  IDs numericos: 001, 002, 003... Sin limite de tareas.',
           'observaciones_generales: riesgos, dependencias, acuerdos relevantes.',
           '',
@@ -850,7 +850,7 @@ const genActaText = async (texto, modo, meta, fechaDef, tareasAnt=[]) => {
     'tareas_nuevas: TODAS las concretas. descripcion+asunto+detalle+responsable+fecha+prioridad+tipo.',
     '  detalle: contexto completo de lo discutido sobre cada tarea.',
     '  VALIDAS: accion+objeto especifico. INVALIDAS: "Revisar"/"Coordinar"/"Ver el tema".',
-    `  fecha: dias habiles desde ${fechaDef}. prioridad: 3=Alta 2=Media 1=Baja. tipo: e=externa i=interna.`,
+    `  fecha: SOLO formato AAAA-MM-DD (dias habiles desde ${fechaDef}). NUNCA texto largo. prioridad: 3=Alta 2=Media 1=Baja. tipo: e=externa i=interna.`,
     '  IDs: 001, 002... Sin limite.',
     'observaciones_generales: riesgos, dependencias, acuerdos relevantes.',
     '',
@@ -909,8 +909,15 @@ const finalizeMeeting = async mid => {
   await db.execute('DELETE FROM tareas WHERE meeting_id=?', [mid]);
   for (const t of tareasAnt) await db.execute('INSERT INTO tareas (meeting_id,tarea_id,tipo,descripcion,responsable,estado,fecha_compromiso) VALUES (?,?,?,?,?,?,?)', [mid, t.tarea_id||uuidv4(), 'anterior', t.descripcion||'', t.responsable||'', t.estado||'pendiente', t.fecha_compromiso||'']);
   const td = dedup(actaJson.tareas_nuevas || []);
+  // Saneo defensivo: trunca cualquier campo de fecha a 50 chars para que jamas
+  // pueda volver a tronar el INSERT, sin importar lo que devuelva el LLM.
+  const safeFecha = (v, fallback) => {
+    const s = String(v || fallback || '').trim();
+    return s.length > 50 ? s.slice(0, 50) : (s || fallback);
+  };
   for (let i = 0; i < td.length; i++) {
     const t = td[i];
+    const fc = safeFecha(t.fecha_compromiso, fd);
     await db.execute(
       `INSERT INTO tareas (meeting_id,tarea_id,tipo,descripcion,asunto,detalle,responsable,asignado_a,
         user_create,estado,estado_tarea,prioridad,tipo_tarea,fecha_compromiso,date_end)
@@ -925,8 +932,8 @@ const finalizeMeeting = async mid => {
        'pendiente', 1,
        t.prioridad||2,
        t.tipo_tarea||'i',
-       t.fecha_compromiso||fd,
-       t.fecha_compromiso||fd
+       fc,
+       fc
       ]);
   }
   await db.execute("UPDATE meetings SET status='ended' WHERE id=?", [mid]);
@@ -1033,129 +1040,6 @@ const procAudio = async (aid, fp, mid, parts=[], cli='', proj='', term='') => {
 // /client/actas:   lista actas del cliente autenticado (solo las de su empresa).
 // /client/actas/:mid/approve: el cliente aprueba el acta (operacion irreversible).
 // =============================================================================
-// =============================================================================
-// CONFIGURACION DE EMPRESA — PROMPT PERSONALIZADO
-// El superadmin puede definir un contexto de rol que se inyecta al inicio
-// del prompt del LLM. Ejemplo: "Actua como experto en analisis financiero."
-// Las variables internas del prompt nunca se exponen ni modifican.
-// =============================================================================
-
-// Obtener el prompt_context de la empresa (cacheable en memoria)
-const getPromptContext = async (company_id) => {
-  try {
-    const [[r]] = await db.execute('SELECT prompt_context FROM company_settings WHERE company_id=?', [company_id]);
-    return (r?.prompt_context || '').trim();
-  } catch(_) { return ''; }
-};
-
-// Leer configuracion de la empresa
-app.get('/admin/settings', requireRole('superadmin', 'admin'), async (req, res) => {
-  try {
-    const [[r]] = await db.execute('SELECT prompt_context FROM company_settings WHERE company_id=?', [req.user.company_id]).catch(()=>[[null]]);
-    res.json({ prompt_context: r?.prompt_context || '' });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Guardar configuracion — solo superadmin puede cambiar el prompt
-app.put('/admin/settings', requireRole('superadmin'), async (req, res) => {
-  try {
-    const { prompt_context = '' } = req.body;
-    // Limite de 500 caracteres para evitar prompts excesivos
-    const safe = String(prompt_context).slice(0, 500).trim();
-    await db.execute(
-      'INSERT INTO company_settings (company_id, prompt_context) VALUES (?,?) ON DUPLICATE KEY UPDATE prompt_context=VALUES(prompt_context)',
-      [req.user.company_id, safe]
-    );
-    res.json({ ok: true, prompt_context: safe });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// =============================================================================
-// GRABACION DE VIDEO
-// El video completo se sube en un solo blob al finalizar la reunion.
-// Se guarda en storage/recordings/ y se sirve con range requests para seek.
-// Solo visible para usuarios internos con acceso — clientes no lo ven.
-// =============================================================================
-
-app.post('/meetings/:id/recording', upload.single('video'), async (req, res) => {
-  try {
-    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
-      return res.status(403).json({ error: 'Sin acceso' });
-    if (!req.file) return res.status(400).json({ error: 'No se recibio video' });
-    const recPath = path.join(storagePath, '..', 'recordings');
-    fs.mkdirSync(recPath, { recursive: true });
-    const fp = path.join(recPath, `${req.params.id}.webm`);
-    fs.writeFileSync(fp, req.file.buffer);
-    const size = req.file.buffer.length;
-    // Crear tabla si no existe (tolerante a primer arranque)
-    await db.execute(`CREATE TABLE IF NOT EXISTS recordings (
-      id INT AUTO_INCREMENT PRIMARY KEY, meeting_id VARCHAR(36) NOT NULL UNIQUE,
-      file_path VARCHAR(500) NOT NULL, file_size BIGINT DEFAULT 0,
-      mime_type VARCHAR(50) DEFAULT 'video/webm', created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-    await db.execute(
-      'INSERT INTO recordings (meeting_id,file_path,file_size,mime_type) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE file_path=VALUES(file_path),file_size=VALUES(file_size)',
-      [req.params.id, fp, size, req.file.mimetype || 'video/webm']
-    );
-    console.log(`[${req.params.id}] Video guardado: ${(size/1024/1024).toFixed(1)}MB`);
-    res.json({ ok: true, size_mb: (size/1024/1024).toFixed(1) });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/meetings/:id/recording/info', async (req, res) => {
-  try {
-    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
-      return res.status(403).json({ error: 'Sin acceso' });
-    try {
-      const [[r]] = await db.execute('SELECT file_size,mime_type,created_at FROM recordings WHERE meeting_id=?', [req.params.id]);
-      if (!r) return res.json({ exists: false });
-      res.json({ exists: true, size_mb: (r.file_size/1024/1024).toFixed(1), created_at: r.created_at });
-    } catch(dbErr) {
-      // Si la tabla no existe aún (primer arranque), responder como si no hubiera video
-      if (dbErr.code === 'ER_NO_SUCH_TABLE') return res.json({ exists: false });
-      throw dbErr;
-    }
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Range requests permiten seek en el reproductor sin descargar el video completo
-app.get('/meetings/:id/recording/stream', async (req, res) => {
-  try {
-    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
-      return res.status(403).json({ error: 'Sin acceso' });
-    let r;
-    try {
-      const [[row]] = await db.execute('SELECT file_path,mime_type FROM recordings WHERE meeting_id=?', [req.params.id]);
-      r = row;
-    } catch(dbErr) {
-      if (dbErr.code === 'ER_NO_SUCH_TABLE') return res.status(404).json({ error: 'Video no encontrado' });
-      throw dbErr;
-    }
-    if (!r || !fs.existsSync(r.file_path)) return res.status(404).json({ error: 'Video no encontrado' });
-    const stat  = fs.statSync(r.file_path);
-    const range = req.headers.range;
-    if (range) {
-      const [startStr, endStr] = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(startStr, 10);
-      const end   = endStr ? parseInt(endStr, 10) : stat.size - 1;
-      res.writeHead(206, {
-        'Content-Range':  `bytes ${start}-${end}/${stat.size}`,
-        'Accept-Ranges':  'bytes',
-        'Content-Length': end - start + 1,
-        'Content-Type':   r.mime_type || 'video/webm',
-      });
-      fs.createReadStream(r.file_path, { start, end }).pipe(res);
-    } else {
-      res.writeHead(200, {
-        'Content-Length': stat.size,
-        'Content-Type':   r.mime_type || 'video/webm',
-        'Accept-Ranges':  'bytes',
-      });
-      fs.createReadStream(r.file_path).pipe(res);
-    }
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 // ─── Login ────────────────────────────────────────────────────────────────────
@@ -1265,6 +1149,134 @@ app.post('/client/actas/:mid/approve', clientAuth, async (req, res) => {
 // que se definan despues de esta linea.
 // =============================================================================
 app.use(authMiddleware);
+
+// =============================================================================
+// CONFIGURACION DE EMPRESA — PROMPT PERSONALIZADO
+// El superadmin puede definir un contexto de rol que se inyecta al inicio
+// del prompt del LLM. Ejemplo: "Actua como experto en analisis financiero."
+// Las variables internas del prompt nunca se exponen ni modifican.
+// NOTA: estas rutas usan req.user, por lo que DEBEN ir despues de
+// app.use(authMiddleware) — moverlas antes de esa linea causa 500
+// (req.user es undefined) en vez del 403 esperado por falta de permiso.
+// =============================================================================
+
+// Obtener el prompt_context de la empresa (cacheable en memoria)
+const getPromptContext = async (company_id) => {
+  try {
+    const [[r]] = await db.execute('SELECT prompt_context FROM company_settings WHERE company_id=?', [company_id]);
+    return (r?.prompt_context || '').trim();
+  } catch(_) { return ''; }
+};
+
+// Leer configuracion de la empresa
+app.get('/admin/settings', requireRole('superadmin', 'admin'), async (req, res) => {
+  try {
+    const [[r]] = await db.execute('SELECT prompt_context FROM company_settings WHERE company_id=?', [req.user.company_id]).catch(()=>[[null]]);
+    res.json({ prompt_context: r?.prompt_context || '' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Guardar configuracion — solo superadmin puede cambiar el prompt
+app.put('/admin/settings', requireRole('superadmin'), async (req, res) => {
+  try {
+    const { prompt_context = '' } = req.body;
+    // Limite de 500 caracteres para evitar prompts excesivos
+    const safe = String(prompt_context).slice(0, 500).trim();
+    await db.execute(
+      'INSERT INTO company_settings (company_id, prompt_context) VALUES (?,?) ON DUPLICATE KEY UPDATE prompt_context=VALUES(prompt_context)',
+      [req.user.company_id, safe]
+    );
+    res.json({ ok: true, prompt_context: safe });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// =============================================================================
+// GRABACION DE VIDEO
+// El video completo se sube en un solo blob al finalizar la reunion.
+// Se guarda en storage/recordings/ y se sirve con range requests para seek.
+// Solo visible para usuarios internos con acceso — clientes no lo ven.
+// NOTA: estas rutas usan req.user (via canAccess), por lo que DEBEN ir
+// despues de app.use(authMiddleware).
+// =============================================================================
+
+app.post('/meetings/:id/recording', upload.single('video'), async (req, res) => {
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso' });
+    if (!req.file) return res.status(400).json({ error: 'No se recibio video' });
+    const recPath = path.join(storagePath, '..', 'recordings');
+    fs.mkdirSync(recPath, { recursive: true });
+    const fp = path.join(recPath, `${req.params.id}.webm`);
+    fs.writeFileSync(fp, req.file.buffer);
+    const size = req.file.buffer.length;
+    // Crear tabla si no existe (tolerante a primer arranque)
+    await db.execute(`CREATE TABLE IF NOT EXISTS recordings (
+      id INT AUTO_INCREMENT PRIMARY KEY, meeting_id VARCHAR(36) NOT NULL UNIQUE,
+      file_path VARCHAR(500) NOT NULL, file_size BIGINT DEFAULT 0,
+      mime_type VARCHAR(50) DEFAULT 'video/webm', created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+    await db.execute(
+      'INSERT INTO recordings (meeting_id,file_path,file_size,mime_type) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE file_path=VALUES(file_path),file_size=VALUES(file_size)',
+      [req.params.id, fp, size, req.file.mimetype || 'video/webm']
+    );
+    console.log(`[${req.params.id}] Video guardado: ${(size/1024/1024).toFixed(1)}MB`);
+    res.json({ ok: true, size_mb: (size/1024/1024).toFixed(1) });
+  } catch(e) { console.error('[recording POST]', e); res.status(500).json({ error: e.message }); }
+});
+
+app.get('/meetings/:id/recording/info', async (req, res) => {
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso' });
+    try {
+      const [[r]] = await db.execute('SELECT file_size,mime_type,created_at FROM recordings WHERE meeting_id=?', [req.params.id]);
+      if (!r) return res.json({ exists: false });
+      res.json({ exists: true, size_mb: (r.file_size/1024/1024).toFixed(1), created_at: r.created_at });
+    } catch(dbErr) {
+      // Si la tabla no existe aún (primer arranque), responder como si no hubiera video
+      if (dbErr.code === 'ER_NO_SUCH_TABLE') return res.json({ exists: false });
+      throw dbErr;
+    }
+  } catch(e) { console.error('[recording INFO]', e); res.status(500).json({ error: e.message }); }
+});
+
+// Range requests permiten seek en el reproductor sin descargar el video completo
+app.get('/meetings/:id/recording/stream', async (req, res) => {
+  try {
+    if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
+      return res.status(403).json({ error: 'Sin acceso' });
+    let r;
+    try {
+      const [[row]] = await db.execute('SELECT file_path,mime_type FROM recordings WHERE meeting_id=?', [req.params.id]);
+      r = row;
+    } catch(dbErr) {
+      if (dbErr.code === 'ER_NO_SUCH_TABLE') return res.status(404).json({ error: 'Video no encontrado' });
+      throw dbErr;
+    }
+    if (!r || !fs.existsSync(r.file_path)) return res.status(404).json({ error: 'Video no encontrado' });
+    const stat  = fs.statSync(r.file_path);
+    const range = req.headers.range;
+    if (range) {
+      const [startStr, endStr] = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(startStr, 10);
+      const end   = endStr ? parseInt(endStr, 10) : stat.size - 1;
+      res.writeHead(206, {
+        'Content-Range':  `bytes ${start}-${end}/${stat.size}`,
+        'Accept-Ranges':  'bytes',
+        'Content-Length': end - start + 1,
+        'Content-Type':   r.mime_type || 'video/webm',
+      });
+      fs.createReadStream(r.file_path, { start, end }).pipe(res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': stat.size,
+        'Content-Type':   r.mime_type || 'video/webm',
+        'Accept-Ranges':  'bytes',
+      });
+      fs.createReadStream(r.file_path).pipe(res);
+    }
+  } catch(e) { console.error('[recording STREAM]', e); res.status(500).json({ error: e.message }); }
+});
 
 // =============================================================================
 // ADMINISTRACION DE EMPRESAS (solo superadmin)
@@ -1726,6 +1738,7 @@ app.post('/meetings/from-text', async (req, res) => {
         const td = dedup(actaJson.tareas_nuevas || []);
         for (let i = 0; i < td.length; i++) {
           const t = td[i];
+          const fc = String(t.fecha_compromiso || addBizDays(meta.fecha,3)).trim().slice(0,50);
           await db.execute(
             `INSERT INTO tareas (meeting_id,tarea_id,tipo,descripcion,asunto,detalle,responsable,asignado_a,
               user_create,estado,estado_tarea,prioridad,tipo_tarea,fecha_compromiso,date_end)
@@ -1740,8 +1753,8 @@ app.post('/meetings/from-text', async (req, res) => {
              'pendiente', 1,
              t.prioridad||2,
              t.tipo_tarea||'i',
-             t.fecha_compromiso||addBizDays(meta.fecha,3),
-             t.fecha_compromiso||addBizDays(meta.fecha,3)
+             fc,
+             fc
             ]);
         }
       } catch(e) { console.error(`[${mid}] from-text error:`, e.message); }
