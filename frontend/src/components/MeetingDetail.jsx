@@ -396,11 +396,15 @@ function MeetingDetail() {
   const [approvedAt, setApprovedAt]     = useState(null);
   const [approvedBy, setApprovedBy]     = useState(null);
   const [companyUsers, setCompanyUsers] = useState([]);
+  const [recording, setRecording]       = useState(null);   // { exists, size_mb, created_at }
+  const [videoUrl, setVideoUrl]         = useState(null);   // blob URL temporal para el reproductor
 
   const isEditingAny = editingActa || modal !== null;
 
   useEffect(() => {
     apiFetch('/admin/users/company').then(r=>r.ok&&r.json()).then(d=>d&&setCompanyUsers(d)).catch(()=>{});
+    // Verificar si la reunion tiene video grabado
+    apiFetch(`/meetings/${id}/recording/info`).then(r=>r.ok&&r.json()).then(d=>d&&setRecording(d)).catch(()=>{});
   }, []);
 
   useEffect(() => {
@@ -612,7 +616,7 @@ function MeetingDetail() {
       )}
 
       <div style={{ marginBottom:20,display:'flex',flexWrap:'wrap',gap:4 }}>
-        {[['transcription','📄 Transcripción'],['acta','📋 Acta'],['tareas','✅ Tareas'],['adjuntos','📎 Adjuntos']].map(([k,label])=>(
+        {[['transcription','📄 Transcripción'],['acta','📋 Acta'],['tareas','✅ Tareas'],['adjuntos','📎 Adjuntos'],['video','🎬 Video']].map(([k,label])=>(
           <button key={k} onClick={()=>setActiveTab(k)} style={tabStyle(activeTab===k)}>{label}</button>
         ))}
       </div>
@@ -761,6 +765,69 @@ function MeetingDetail() {
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* VIDEO */}
+      {activeTab==='video'&&(
+        <div>
+          <h2>Video de la reunión</h2>
+          <p style={{ fontSize:13, color:'#666', marginBottom:16 }}>
+            Solo visible para usuarios internos con acceso a esta reunión. Los clientes no ven este video.
+          </p>
+          {!recording?.exists ? (
+            <div style={{ padding:30, backgroundColor:'#f9fafb', borderRadius:8, textAlign:'center', color:'#888', border:'1px dashed #ddd' }}>
+              <div style={{ fontSize:40, marginBottom:10 }}>🎬</div>
+              <p style={{ margin:0, fontSize:14 }}>No hay video grabado para esta reunión.</p>
+              <p style={{ margin:'6px 0 0', fontSize:12 }}>Las reuniones deben grabarse en modo "Video + Audio" para tener grabación disponible.</p>
+            </div>
+          ) : (
+            <div>
+              <div style={{ marginBottom:12, padding:'8px 14px', backgroundColor:'#F0FDF4', borderRadius:6, fontSize:12, color:'#15803d', display:'flex', alignItems:'center', gap:8 }}>
+                Video disponible · {recording.size_mb} MB ·
+                Grabado el {new Date(recording.created_at).toLocaleString('es-ES')}
+              </div>
+              {!videoUrl ? (
+                <div style={{ textAlign:'center', padding:20 }}>
+                  <button onClick={async () => {
+                    const token = localStorage.getItem('auth_token');
+                    const res   = await fetch(`${import.meta.env.VITE_API_BASE_URL}/meetings/${id}/recording/stream`, {
+                      headers: { Authorization: `Bearer ${token}` }
+                    });
+                    if (!res.ok) { alert('Error al cargar el video'); return; }
+                    const blob = await res.blob();
+                    setVideoUrl(URL.createObjectURL(blob));
+                  }} style={{ padding:'12px 28px', backgroundColor:'#7c3aed', color:'white', border:'none', borderRadius:8, fontSize:14, fontWeight:600, cursor:'pointer' }}>
+                    Cargar video
+                  </button>
+                  <p style={{ fontSize:12, color:'#888', marginTop:8 }}>El video se carga bajo demanda para ahorrar ancho de banda.</p>
+                </div>
+              ) : (
+                <div>
+                  <video
+                    src={videoUrl}
+                    controls
+                    style={{ width:'100%', borderRadius:8, backgroundColor:'#000', maxHeight:500 }}
+                    onError={() => alert('Error reproduciendo el video')}
+                  />
+                  <div style={{ marginTop:8, display:'flex', gap:8 }}>
+                    <button onClick={() => {
+                      const a = document.createElement('a');
+                      a.href = videoUrl;
+                      a.download = `Reunion_${meeting?.cliente||''}_${meeting?.proyecto||''}.webm`;
+                      a.click();
+                    }} style={{ padding:'8px 16px', backgroundColor:'#1565C0', color:'white', border:'none', borderRadius:6, fontSize:13, cursor:'pointer', fontWeight:600 }}>
+                      Descargar video
+                    </button>
+                    <button onClick={() => { URL.revokeObjectURL(videoUrl); setVideoUrl(null); }}
+                      style={{ padding:'8px 16px', backgroundColor:'#f1f5f9', color:'#475569', border:'1px solid #e2e8f0', borderRadius:6, fontSize:13, cursor:'pointer' }}>
+                      Cerrar reproductor
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
