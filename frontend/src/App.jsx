@@ -29,6 +29,7 @@ import FloatingRecordingBar from './components/FloatingRecordingBar';
 import ClientsAdmin        from './components/ClientsAdmin';
 import UsersAdmin          from './components/UsersAdmin';
 import ClientPortal        from './components/ClientPortal';
+import Settings             from './components/Settings';
 import './App.css';
 
 // -----------------------------------------------------------------------------
@@ -51,8 +52,11 @@ function SidebarNav() {
     { icon: '✍️',  label: 'Ingresar Texto',   path: '/manual'  },
     { icon: '📋',  label: 'Reuniones',         path: '/meetings'},
     ...(canManage ? [
-      { icon: '👥', label: 'Equipo',            path: '/users'  },
-      { icon: '🏢', label: 'Clientes / Portal', path: '/clients'},
+      { icon: '👥', label: 'Equipo',            path: '/users'    },
+      { icon: '🏢', label: 'Clientes / Portal', path: '/clients'  },
+    ] : []),
+    ...(user?.role === 'superadmin' ? [
+      { icon: '⚙️', label: 'Configuracion',     path: '/settings' },
     ] : []),
   ];
 
@@ -186,8 +190,10 @@ function AppLayout() {
             <Route path="/meetings"     element={<MeetingsList />} />
             <Route path="/meetings/:id" element={<MeetingDetail />} />
             {/* Rutas protegidas por rol — solo admin y superadmin */}
-            <Route path="/users"   element={<AdminRoute><UsersAdmin /></AdminRoute>} />
-            <Route path="/clients" element={<AdminRoute><ClientsAdmin /></AdminRoute>} />
+            <Route path="/users"    element={<AdminRoute><UsersAdmin /></AdminRoute>} />
+            <Route path="/clients"  element={<AdminRoute><ClientsAdmin /></AdminRoute>} />
+            {/* Configuracion — solo superadmin */}
+            <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
           </Routes>
         </div>
       </main>
