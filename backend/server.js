@@ -397,13 +397,19 @@ console.log(`🤖 IA: ${AI_PROVIDER.toUpperCase()} | LLM: ${LLM_MODEL} | Whisper
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 },  // 100 MB máximo
+  limits: { fileSize: 500 * 1024 * 1024 },  // 500 MB — soporta videos de reuniones largas
   fileFilter: (req, file, cb) => {
-    const allowed = ['audio/webm','audio/mp3','audio/mpeg','audio/wav',
+    const allowed = [
+      // Audio
+      'audio/webm','audio/mp3','audio/mpeg','audio/wav',
       'audio/m4a','audio/ogg','audio/flac','audio/aac',
+      // Video (grabaciones de reuniones)
+      'video/webm','video/mp4','video/ogg','video/quicktime',
+      // Documentos
       'application/pdf','image/jpeg','image/png','image/gif',
       'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ];
     if (allowed.includes(file.mimetype)) cb(null, true);
     else cb(new Error('Tipo de archivo no permitido: ' + file.mimetype));
   }
