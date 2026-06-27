@@ -323,6 +323,15 @@ const createTables = async () => {
     transcription LONGTEXT, transcription_status VARCHAR(20) DEFAULT 'pending',
     uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 
+  // Configuracion personalizada por empresa (prompt, tono, etc.)
+  await db.execute(`CREATE TABLE IF NOT EXISTS company_settings (
+    id           INT AUTO_INCREMENT PRIMARY KEY,
+    company_id   INT         NOT NULL UNIQUE,
+    prompt_context TEXT      DEFAULT '',
+    updated_at   DATETIME    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  )`);
+
   // Grabaciones de video de reuniones
   await db.execute(`CREATE TABLE IF NOT EXISTS recordings (
     id           INT AUTO_INCREMENT PRIMARY KEY,
@@ -654,9 +663,11 @@ const checkSection = async mid => {
 // El JSON del acta contiene: identificacion, tareas_anteriores, tareas_nuevas,
 // resumen_reunion y observaciones_generales.
 // =============================================================================
-const buildActaPrompt = (meta, sectionInputs, allTareasBruto, tareasAnt, suppBlk, hasSup, fechaDef) => [
+const buildActaPrompt = (meta, sectionInputs, allTareasBruto, tareasAnt, suppBlk, hasSup, fechaDef, promptCtx='') => [
   '=== ROL ===',
-  'Eres un redactor senior de actas corporativas en español latinoamericano.',
+  promptCtx
+    ? promptCtx  // Contexto personalizado definido por el superadmin
+    : 'Eres un redactor senior de actas corporativas en español latinoamericano.',
   'Tu objetivo: generar un acta ejecutiva profesional, completa y accionable.',
   '',
   '=== DATOS DE LA REUNION ===',
@@ -1023,6 +1034,43 @@ const procAudio = async (aid, fp, mid, parts=[], cli='', proj='', term='') => {
 // /client/actas/:mid/approve: el cliente aprueba el acta (operacion irreversible).
 // =============================================================================
 // =============================================================================
+// CONFIGURACION DE EMPRESA — PROMPT PERSONALIZADO
+// El superadmin puede definir un contexto de rol que se inyecta al inicio
+// del prompt del LLM. Ejemplo: "Actua como experto en analisis financiero."
+// Las variables internas del prompt nunca se exponen ni modifican.
+// =============================================================================
+
+// Obtener el prompt_context de la empresa (cacheable en memoria)
+const getPromptContext = async (company_id) => {
+  try {
+    const [[r]] = await db.execute('SELECT prompt_context FROM company_settings WHERE company_id=?', [company_id]);
+    return (r?.prompt_context || '').trim();
+  } catch(_) { return ''; }
+};
+
+// Leer configuracion de la empresa
+app.get('/admin/settings', requireRole('superadmin', 'admin'), async (req, res) => {
+  try {
+    const [[r]] = await db.execute('SELECT prompt_context FROM company_settings WHERE company_id=?', [req.user.company_id]).catch(()=>[[null]]);
+    res.json({ prompt_context: r?.prompt_context || '' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Guardar configuracion — solo superadmin puede cambiar el prompt
+app.put('/admin/settings', requireRole('superadmin'), async (req, res) => {
+  try {
+    const { prompt_context = '' } = req.body;
+    // Limite de 500 caracteres para evitar prompts excesivos
+    const safe = String(prompt_context).slice(0, 500).trim();
+    await db.execute(
+      'INSERT INTO company_settings (company_id, prompt_context) VALUES (?,?) ON DUPLICATE KEY UPDATE prompt_context=VALUES(prompt_context)',
+      [req.user.company_id, safe]
+    );
+    res.json({ ok: true, prompt_context: safe });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// =============================================================================
 // GRABACION DE VIDEO
 // El video completo se sube en un solo blob al finalizar la reunion.
 // Se guarda en storage/recordings/ y se sirve con range requests para seek.
@@ -1039,6 +1087,12 @@ app.post('/meetings/:id/recording', upload.single('video'), async (req, res) => 
     const fp = path.join(recPath, `${req.params.id}.webm`);
     fs.writeFileSync(fp, req.file.buffer);
     const size = req.file.buffer.length;
+    // Crear tabla si no existe (tolerante a primer arranque)
+    await db.execute(`CREATE TABLE IF NOT EXISTS recordings (
+      id INT AUTO_INCREMENT PRIMARY KEY, meeting_id VARCHAR(36) NOT NULL UNIQUE,
+      file_path VARCHAR(500) NOT NULL, file_size BIGINT DEFAULT 0,
+      mime_type VARCHAR(50) DEFAULT 'video/webm', created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
     await db.execute(
       'INSERT INTO recordings (meeting_id,file_path,file_size,mime_type) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE file_path=VALUES(file_path),file_size=VALUES(file_size)',
       [req.params.id, fp, size, req.file.mimetype || 'video/webm']
@@ -1052,9 +1106,15 @@ app.get('/meetings/:id/recording/info', async (req, res) => {
   try {
     if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
       return res.status(403).json({ error: 'Sin acceso' });
-    const [[r]] = await db.execute('SELECT file_size,mime_type,created_at FROM recordings WHERE meeting_id=?', [req.params.id]);
-    if (!r) return res.json({ exists: false });
-    res.json({ exists: true, size_mb: (r.file_size/1024/1024).toFixed(1), created_at: r.created_at });
+    try {
+      const [[r]] = await db.execute('SELECT file_size,mime_type,created_at FROM recordings WHERE meeting_id=?', [req.params.id]);
+      if (!r) return res.json({ exists: false });
+      res.json({ exists: true, size_mb: (r.file_size/1024/1024).toFixed(1), created_at: r.created_at });
+    } catch(dbErr) {
+      // Si la tabla no existe aún (primer arranque), responder como si no hubiera video
+      if (dbErr.code === 'ER_NO_SUCH_TABLE') return res.json({ exists: false });
+      throw dbErr;
+    }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1063,7 +1123,14 @@ app.get('/meetings/:id/recording/stream', async (req, res) => {
   try {
     if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
       return res.status(403).json({ error: 'Sin acceso' });
-    const [[r]] = await db.execute('SELECT file_path,mime_type FROM recordings WHERE meeting_id=?', [req.params.id]);
+    let r;
+    try {
+      const [[row]] = await db.execute('SELECT file_path,mime_type FROM recordings WHERE meeting_id=?', [req.params.id]);
+      r = row;
+    } catch(dbErr) {
+      if (dbErr.code === 'ER_NO_SUCH_TABLE') return res.status(404).json({ error: 'Video no encontrado' });
+      throw dbErr;
+    }
     if (!r || !fs.existsSync(r.file_path)) return res.status(404).json({ error: 'Video no encontrado' });
     const stat  = fs.statSync(r.file_path);
     const range = req.headers.range;
