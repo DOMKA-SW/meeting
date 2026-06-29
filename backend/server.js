@@ -1656,6 +1656,38 @@ app.put('/meetings/:id/acta', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Todas las tareas de la empresa filtradas por rol:
+// superadmin -> todas | admin -> toda su empresa | member -> solo sus reuniones o invitado
+app.get('/tareas', async (req, res) => {
+  try {
+    let sql, params;
+    if (req.user.role === 'superadmin') {
+      sql = `SELECT t.*,m.cliente,m.proyecto,m.responsable,m.started_at,m.id as meeting_uuid
+             FROM tareas t JOIN meetings m ON m.id=t.meeting_id
+             ORDER BY m.started_at DESC,t.tipo DESC,t.id`;
+      params = [];
+    } else if (req.user.role === 'admin') {
+      sql = `SELECT t.*,m.cliente,m.proyecto,m.responsable,m.started_at,m.id as meeting_uuid
+             FROM tareas t JOIN meetings m ON m.id=t.meeting_id
+             WHERE m.company_id=?
+             ORDER BY m.started_at DESC,t.tipo DESC,t.id`;
+      params = [req.user.company_id];
+    } else {
+      // member: solo sus reuniones o donde fue invitado
+      sql = `SELECT t.*,m.cliente,m.proyecto,m.responsable,m.started_at,m.id as meeting_uuid
+             FROM tareas t JOIN meetings m ON m.id=t.meeting_id
+             WHERE m.company_id=? AND (
+               m.created_by=? OR
+               EXISTS (SELECT 1 FROM meeting_users mu WHERE mu.meeting_id=m.id AND mu.user_id=?)
+             )
+             ORDER BY m.started_at DESC,t.tipo DESC,t.id`;
+      params = [req.user.company_id, req.user.id, req.user.id];
+    }
+    const [rows] = await db.execute(sql, params);
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/meetings/:id/tareas', async (req, res) => {
   try {
     if (!await canAccess(req.params.id, req.user.id, req.user.company_id, req.user.role))
