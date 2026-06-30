@@ -179,6 +179,41 @@ export default function RecordMeeting() {
                 El video se guarda al finalizar la reunión. Reuniones largas pueden generar archivos grandes.
               </div>
             )}
+
+            {/* Invitar usuarios del sistema para que vean la reunión en tiempo real */}
+            <div style={{ marginBottom:12 }}>
+              <label style={labelStyle}>
+                Invitar usuarios del sistema
+                <span style={{ fontWeight:400, color:'#888', marginLeft:6 }}>— verán la reunión en tiempo real</span>
+              </label>
+              {companyUsers.length > 0 ? (
+                <div style={{ display:'flex', flexWrap:'wrap', gap:6, padding:'8px 10px', border:'1px solid #dde1e7', borderRadius:6, backgroundColor:'white', minHeight:42 }}>
+                  {companyUsers.map(u => {
+                    const selected = (form.invited_user_ids||[]).includes(u.id);
+                    return (
+                      <button key={u.id} type="button" onClick={() => {
+                        const arr = [...(form.invited_user_ids||[])];
+                        const idx = arr.indexOf(u.id);
+                        if (idx >= 0) arr.splice(idx,1); else arr.push(u.id);
+                        setForm(f=>({...f, invited_user_ids: arr}));
+                      }} style={{ padding:'3px 10px', borderRadius:20, fontSize:12, cursor:'pointer', border:'1px solid', fontWeight:500,
+                        backgroundColor: selected?'#7c3aed':'#f0f4f8',
+                        color: selected?'white':'#555',
+                        borderColor: selected?'#7c3aed':'#ccc' }}>
+                        {selected?'✓ ':''}{u.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p style={{ fontSize:12, color:'#999', margin:'4px 0 0' }}>No hay otros usuarios en tu empresa.</p>
+              )}
+              {(form.invited_user_ids||[]).length > 0 && (
+                <p style={{ fontSize:11, color:'#7c3aed', margin:'4px 0 0', fontWeight:600 }}>
+                  {form.invited_user_ids.length} usuario(s) invitado(s) — podrán ver la reunión en vivo
+                </p>
+              )}
+            </div>
           </div>
 
           <button onClick={handleStart}
