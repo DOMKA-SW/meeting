@@ -21,7 +21,7 @@ const getSupportedVideoMimeType = () => {
 export function RecordingProvider({ children }) {
   const [isRecording, setIsRecording]   = useState(false);
   const [meetingId, setMeetingId]       = useState(null);
-  const [form, setForm]                 = useState({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'' });
+  const [form, setForm]                 = useState({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'', invited_user_ids:[] });
   const [duration, setDuration]         = useState(0);
   const [chunkNumber, setChunkNumber]   = useState(0);
   const [progress, setProgress]         = useState({ chunksTotal:0, chunksProcessed:0, sectionsGenerated:0, transcriptionLines:0 });
@@ -233,7 +233,8 @@ export function RecordingProvider({ children }) {
           cliente: form.cliente.trim(), proyecto: form.proyecto.trim(),
           responsable: form.responsable.trim(), participantes: participantesArr,
           linked_meeting_id: form.linked_meeting_id || null,
-          terminology: form.terminology.trim()
+          terminology: form.terminology.trim(),
+          invited_user_ids: form.invited_user_ids || []
         })
       });
 
@@ -282,7 +283,7 @@ export function RecordingProvider({ children }) {
   }, [form, createAndStartRecorder, rotateChunk, startProgressPolling, startVideoRecorder]);
 
   const resetMeetingForm = useCallback(() => {
-    setForm({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'' });
+    setForm({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'', invited_user_ids:[] });
     setMeetingId(null);
     setIsRecording(false);
     setRecordMode('audio');
