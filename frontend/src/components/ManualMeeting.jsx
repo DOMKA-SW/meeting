@@ -78,7 +78,7 @@ export default function ManualMeeting() {
   const textareaRef = useRef(null);
   const [modo, setModo]                   = useState('notas');
   const [texto, setTexto]                 = useState('');
-  const [form, setForm]                   = useState({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'' });
+  const [form, setForm]                   = useState({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'', invited_user_ids:[] });
   const [companyUsers, setCompanyUsers]   = useState([]);
   useEffect(() => {
     apiFetch('/admin/users/company').then(r=>r.ok&&r.json()).then(d=>d&&setCompanyUsers(d)).catch(()=>{});
@@ -119,7 +119,8 @@ export default function ManualMeeting() {
           responsable:form.responsable.trim(), participantes:participantesArr,
           texto:texto.trim(), modo, fecha:fecha||null, hora_inicio:horaInicio,
           hora_fin:horaFin, linked_meeting_id:form.linked_meeting_id||null,
-          terminology:form.terminology.trim()
+          terminology:form.terminology.trim(),
+          invited_user_ids: form.invited_user_ids||[]
         })
       });
       const data = await res.json();
@@ -243,6 +244,34 @@ export default function ManualMeeting() {
       {error && (
         <div style={{ padding:12, backgroundColor:'#fef2f2', border:'1px solid #fecaca', borderRadius:8, fontSize:13, color:'#dc2626', marginBottom:16 }}>
           ⚠️ {error}
+        </div>
+      )}
+
+      {/* Invitar usuarios del sistema */}
+      {companyUsers.length > 0 && (
+        <div style={{ marginBottom:16 }}>
+          <label style={labelStyle}>
+            Invitar usuarios
+            <span style={{ fontWeight:400, color:'#888', marginLeft:6 }}>— tendrán acceso a esta reunión</span>
+          </label>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6, padding:'8px 10px', border:'1px solid #dde1e7', borderRadius:6, backgroundColor:'white', minHeight:42 }}>
+            {companyUsers.map(u => {
+              const selected = (form.invited_user_ids||[]).includes(u.id);
+              return (
+                <button key={u.id} type="button" onClick={() => {
+                  const arr = [...(form.invited_user_ids||[])];
+                  const idx = arr.indexOf(u.id);
+                  if (idx >= 0) arr.splice(idx,1); else arr.push(u.id);
+                  set('invited_user_ids', arr);
+                }} style={{ padding:'3px 10px', borderRadius:20, fontSize:12, cursor:'pointer', border:'1px solid', fontWeight:500,
+                  backgroundColor: selected?'#7c3aed':'#f0f4f8',
+                  color: selected?'white':'#555',
+                  borderColor: selected?'#7c3aed':'#ccc' }}>
+                  {selected?'✓ ':''}{u.name}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
