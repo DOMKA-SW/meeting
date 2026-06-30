@@ -549,7 +549,10 @@ function MeetingDetail() {
   const btnStyle = (color,disabled=false) => ({ padding:'8px 16px',marginRight:8,marginBottom:4,backgroundColor:disabled?'#ccc':color,color:'white',border:'none',borderRadius:6,cursor:disabled?'default':'pointer',fontSize:13,fontWeight:500 });
   const tabStyle = (active) => ({ padding:'10px 22px',marginRight:8,backgroundColor:active?'#1565C0':'#e8eaf6',color:active?'white':'#3c4280',border:'none',borderRadius:6,cursor:'pointer',fontWeight:active?700:500,fontSize:13 });
   const fieldStyle = (editing) => ({ width:'100%',padding:'7px 10px',border:editing?'1px solid #90CAF9':'1px solid #e0e0e0',borderRadius:5,fontSize:13,boxSizing:'border-box',backgroundColor:editing?'#fff':'#fafafa',outline:'none' });
-  const isActive = meeting.status==='active';
+  const isActive   = meeting.status==='active';
+  // Detectar si el usuario es el creador o solo un invitado observador
+  const isOwner    = !meeting.created_by || meeting.created_by === user?.id;
+  const isObserver = !isOwner; // invitado — puede ver y anotar, pero no cerrar ni editar durante grabación
 
   const renderTareasActa = (tipo, label) => {
     const items = actaDraft?.[tipo]||[];
@@ -615,6 +618,26 @@ function MeetingDetail() {
         </div>
       )}
 
+      {/* Banner observador — reunión activa */}
+      {isActive && isObserver && (
+        <div style={{ marginBottom:16, padding:'12px 18px', backgroundColor:'#EFF6FF', border:'1px solid #BFDBFE', borderRadius:8, display:'flex', alignItems:'center', gap:12 }}>
+          <span style={{ fontSize:20 }}>👁️</span>
+          <div>
+            <div style={{ fontWeight:700, color:'#1565C0', fontSize:14 }}>Estás viendo esta reunión en tiempo real</div>
+            <div style={{ fontSize:12, color:'#3b82f6', marginTop:2 }}>La transcripción se actualiza cada 5 segundos. Puedes agregar notas pero no puedes cerrar la reunión.</div>
+          </div>
+        </div>
+      )}
+
+      {/* Banner creador — reunión activa */}
+      {isActive && isOwner && (
+        <div style={{ marginBottom:16, padding:'10px 16px', backgroundColor:'#FEF2F2', border:'1px solid #FECACA', borderRadius:8, fontSize:13, color:'#dc2626', display:'flex', alignItems:'center', gap:8 }}>
+          <span style={{ width:10, height:10, borderRadius:'50%', backgroundColor:'#dc2626', display:'inline-block', animation:'livepulse 1.5s infinite' }} />
+          Reunión en curso — la transcripción se actualiza automáticamente
+          <style>{`@keyframes livepulse{0%,100%{opacity:1}50%{opacity:0.3}}`}</style>
+        </div>
+      )}
+
       <div style={{ marginBottom:20,display:'flex',flexWrap:'wrap',gap:4 }}>
         {[['transcription','📄 Transcripción'],['acta','📋 Acta'],['tareas','✅ Tareas'],['adjuntos','📎 Adjuntos'],['video','🎬 Video']].map(([k,label])=>(
           <button key={k} onClick={()=>setActiveTab(k)} style={tabStyle(activeTab===k)}>{label}</button>
@@ -666,10 +689,17 @@ function MeetingDetail() {
           ) : (
             <div>
               <div style={{ marginBottom:16,display:'flex',flexWrap:'wrap',gap:4 }}>
-                <button onClick={()=>{if(editingActa){setActaDraft(acta);setActaDirty(false);}setEditingActa(v=>!v);}} style={btnStyle(editingActa?'#757575':'#455a64')}>{editingActa?'✕ Cancelar':'✏️ Editar acta'}</button>
-                <button onClick={saveActa} disabled={!actaDirty||savingActa} style={btnStyle('#1565C0',!actaDirty||savingActa)}>{savingActa?'Guardando…':'💾 Guardar'}</button>
+                {/* Solo el creador puede editar durante reunión activa; invitado puede editar después */}
+                {(!isActive || isOwner) && (
+                  <button onClick={()=>{if(editingActa){setActaDraft(acta);setActaDirty(false);}setEditingActa(v=>!v);}} style={btnStyle(editingActa?'#757575':'#455a64')}>{editingActa?'✕ Cancelar':'✏️ Editar acta'}</button>
+                )}
+                {(!isActive || isOwner) && (
+                  <button onClick={saveActa} disabled={!actaDirty||savingActa} style={btnStyle('#1565C0',!actaDirty||savingActa)}>{savingActa?'Guardando…':'💾 Guardar'}</button>
+                )}
                 <button onClick={()=>generarPDF(actaDraft||acta,meeting)} style={btnStyle('#E53935')}>📄 PDF</button>
-                <button onClick={async()=>{if(!confirm('¿Reprocesar acta?'))return;const r=await apiFetch(`/meetings/${id}/reprocess-acta`,{method:'POST'});if(r.ok){alert('Reprocesando...');setTimeout(fetchMeetingData,5000);}}} style={btnStyle('#9C27B0')}>🔄 Reprocesar</button>
+                {(!isActive || isOwner) && (
+                  <button onClick={async()=>{if(!confirm('¿Reprocesar acta?'))return;const r=await apiFetch(`/meetings/${id}/reprocess-acta`,{method:'POST'});if(r.ok){alert('Reprocesando...');setTimeout(fetchMeetingData,5000);}}} style={btnStyle('#9C27B0')}>🔄 Reprocesar</button>
+                )}
               </div>
               {editingActa&&<div style={{ marginBottom:14,padding:'10px 16px',backgroundColor:'#E3F2FD',borderRadius:8,fontSize:13,color:'#1565C0',borderLeft:'4px solid #2196F3' }}>✏️ Modo edición activo</div>}
               <div>
@@ -728,8 +758,12 @@ function MeetingDetail() {
           ) : (
             <div>
               <div style={{ marginBottom:12,display:'flex',flexWrap:'wrap',gap:6,alignItems:'center' }}>
-                <button onClick={saveTareas} disabled={!tareasDirty||savingTareas} style={btnStyle('#1565C0',!tareasDirty||savingTareas)}>{savingTareas?'Guardando…':'💾 Guardar cambios'}</button>
-                <button onClick={agregarTareaTab} style={btnStyle('#2E7D32')}>➕ Agregar</button>
+                {(!isActive || isOwner) && (
+                  <button onClick={saveTareas} disabled={!tareasDirty||savingTareas} style={btnStyle('#1565C0',!tareasDirty||savingTareas)}>{savingTareas?'Guardando…':'💾 Guardar cambios'}</button>
+                )}
+                {(!isActive || isOwner) && (
+                  <button onClick={agregarTareaTab} style={btnStyle('#2E7D32')}>➕ Agregar</button>
+                )}
                 <button onClick={descargarExcel} style={btnStyle('#388E3C')}>📥 Excel</button>
                 {tareasDirty&&<span style={{ fontSize:12,color:'#e65100' }}>● Cambios sin guardar</span>}
               </div>
@@ -814,12 +848,14 @@ function MeetingDetail() {
                   />
                   <div style={{ marginTop:8, display:'flex', gap:8 }}>
                     <button onClick={() => {
+                      // Se descarga como .mp4 para compatibilidad con reproductores externos.
+                      // El contenido sigue siendo webm pero la mayoría de reproductores lo abren igual.
                       const a = document.createElement('a');
                       a.href = videoUrl;
-                      a.download = `Reunion_${meeting?.cliente||''}_${meeting?.proyecto||''}.webm`;
+                      a.download = `Reunion_${(meeting?.cliente||'').replace(/[^a-z0-9]/gi,'_')}_${(meeting?.proyecto||'').replace(/[^a-z0-9]/gi,'_')}.mp4`;
                       a.click();
                     }} style={{ padding:'8px 16px', backgroundColor:'#1565C0', color:'white', border:'none', borderRadius:6, fontSize:13, cursor:'pointer', fontWeight:600 }}>
-                      Descargar video
+                      Descargar video (.mp4)
                     </button>
                     <button onClick={() => { URL.revokeObjectURL(videoUrl); setVideoUrl(null); }}
                       style={{ padding:'8px 16px', backgroundColor:'#f1f5f9', color:'#475569', border:'1px solid #e2e8f0', borderRadius:6, fontSize:13, cursor:'pointer' }}>
