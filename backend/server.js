@@ -332,6 +332,31 @@ const createTables = async () => {
     FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
   )`);
 
+  // API Keys para integracion con sistemas externos
+  await db.execute(`CREATE TABLE IF NOT EXISTS api_keys (
+    id           INT AUTO_INCREMENT PRIMARY KEY,
+    company_id   INT          NOT NULL,
+    name         VARCHAR(200) NOT NULL,
+    key_hash     VARCHAR(100) NOT NULL UNIQUE,
+    key_prefix   VARCHAR(12)  NOT NULL,
+    active       TINYINT(1)   DEFAULT 1,
+    created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP,
+    last_used_at DATETIME     NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  )`);
+
+  // Proyectos reutilizables por empresa
+  await db.execute(`CREATE TABLE IF NOT EXISTS projects (
+    id         INT AUTO_INCREMENT PRIMARY KEY,
+    company_id INT          NOT NULL,
+    name       VARCHAR(200) NOT NULL,
+    cliente    VARCHAR(200) DEFAULT '',
+    active     TINYINT(1)   DEFAULT 1,
+    created_at DATETIME     DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_proj (company_id, name),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  )`);
+
   // Grabaciones de video de reuniones
   await db.execute(`CREATE TABLE IF NOT EXISTS recordings (
     id           INT AUTO_INCREMENT PRIMARY KEY,
@@ -389,7 +414,7 @@ const openaiClient = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : n
 
 // Modelos activos según proveedor
 const LLM_MODEL   = AI_PROVIDER === 'openai'
-  ? (process.env.OPENAI_LLM_MODEL  || 'gpt-4o-mini')
+  ? (process.env.OPENAI_LLM_MODEL  || 'gpt-4o')   // gpt-4o para mejor calidad de tareas
   : (process.env.GROQ_LLM_MODEL    || 'llama-3.3-70b-versatile');
 
 const FAST_MODEL  = AI_PROVIDER === 'openai' ? 'gpt-4o-mini'      : 'llama-3.1-8b-instant';
@@ -467,7 +492,7 @@ const callLLM = async (prompt, model = LLM_MODEL, retries = 3) => {
       const r = await client.chat.completions.create({
         model:           useModel,
         messages:        [{ role: 'user', content: prompt }],
-        temperature:     0.1,
+        temperature:     0.0,  // 0 = maximo determinismo
         response_format: { type: 'json_object' },
       });
       return r.choices?.[0]?.message?.content || null;
@@ -665,73 +690,70 @@ const checkSection = async mid => {
 // =============================================================================
 const buildActaPrompt = (meta, sectionInputs, allTareasBruto, tareasAnt, suppBlk, hasSup, fechaDef, promptCtx='') => [
   '=== ROL ===',
-  promptCtx
-    ? promptCtx  // Contexto personalizado definido por el superadmin
-    : 'Eres un redactor senior de actas corporativas en español latinoamericano.',
-  'Tu objetivo: generar un acta ejecutiva profesional, completa y accionable.',
+  promptCtx || 'Eres un redactor senior de actas corporativas en español latinoamericano.',
+  'Tu objetivo: generar un acta EJECUTIVA, COMPLETA y ACCIONABLE. Cada tarea debe ser autoexplicativa sin necesidad de releer la transcripcion.',
   '',
   '=== DATOS DE LA REUNION ===',
   `Cliente: ${meta.cliente} | Proyecto: ${meta.proyecto}`,
   `Fecha: ${meta.fecha} | Inicio: ${meta.hora_inicio} | Fin: ${meta.hora_fin}`,
-  `Responsable: ${meta.responsable}`,
-  `Participantes: ${(meta.participantes || []).join(', ')}`,
+  `Responsable: ${meta.responsable} | Participantes: ${(meta.participantes||[]).join(', ')}`,
   '',
   tareasAnt.length
-    ? `=== TAREAS DE REUNION ANTERIOR (NO repetir en tareas_nuevas) ===\n${tareasAnt.map(t => `  [${t.estado.toUpperCase()}] ${t.descripcion} — ${t.responsable || 'sin asignar'}`).join('\n')}`
+    ? `=== TAREAS REUNION ANTERIOR (NO repetir en nuevas) ===\n${tareasAnt.map(t=>`  [${t.estado.toUpperCase()}] ${t.descripcion} — ${t.responsable||'sin asignar'}`).join('\n')}`
     : '',
   '',
   '=== CONTENIDO DE LA REUNION ===',
-  sectionInputs,
-  suppBlk,
+  sectionInputs, suppBlk,
   '',
-  '=== TAREAS YA DETECTADAS (consolidar, ampliar, no omitir) ===',
+  '=== TAREAS PRE-DETECTADAS (ampliar, no omitir ninguna) ===',
   JSON.stringify(allTareasBruto, null, 2),
+  '',
+  '=== EJEMPLO DE TAREA CORRECTAMENTE GENERADA ===',
+  'Si en la reunion se dijo: "Carlos, necesitas hacer el empalme con Joana para explicarle el flujo antes del jueves"',
+  'La tarea debe quedar exactamente asi:',
+  '  asunto: "Empalme con Joana Sosa — flujo del proyecto"',
+  '  descripcion: "Realizar empalme con Joana Sosa para explicarle el flujo, estructura y funcionamiento actual del proyecto."',
+  '  detalle: "Carlos debe coordinar una sesion de transferencia con Joana Sosa. La sesion debe cubrir: flujo de trabajo actual, estructura del equipo, herramientas utilizadas, estado de cada modulo y dependencias criticas. El objetivo es que Joana quede completamente autonoma para continuar el proyecto sin depender de Carlos."',
+  '  responsable: "Carlos"  |  prioridad: 3  |  tipo_tarea: "i"',
+  '',
+  'REGLA CRITICA: descripcion = 1 oracion sujeto+verbo+objeto. detalle = parrafo completo con TODO el contexto para ejecutarla sin releer el acta.',
   '',
   '=== INSTRUCCIONES ===',
   '',
   '--- resumen_reunion ---',
-  'Prosa ejecutiva de 5 a 8 frases con esta estructura:',
-  '  1. Objetivo principal de la reunion.',
-  '  2. Temas especificos tratados.',
-  '  3. Decisiones tomadas — indica quien decidio.',
-  '  4. Acuerdos alcanzados.',
-  '  5. Proximos pasos generales del equipo.',
-  'Tono formal. Tercera persona. Sin bullets. Solo prosa continua.',
-  hasSup ? 'Integra la informacion de notas y audios adjuntos en el resumen.' : '',
+  'Prosa ejecutiva 5-8 frases: 1.Objetivo 2.Temas tratados 3.Decisiones con nombres 4.Acuerdos 5.Proximos pasos.',
+  'Tono formal. Tercera persona. Sin bullets.',
+  hasSup ? 'Integra informacion de notas y audios adjuntos.' : '',
   '',
   '--- tareas_nuevas ---',
-  'Extrae TODAS las tareas concretas. Se exhaustivo, no omitas ninguna.',
+  'EXTRAE ABSOLUTAMENTE TODAS las tareas concretas. No omitas ninguna.',
   '',
-  'INCLUIR: accion especifica + objeto identificable.',
-  '  OK: "Enviar el contrato al cliente antes del viernes"',
-  '  OK: "Actualizar el tablero de validacion con datos de mayo"',
-  '  OK: "Ricardo revisara los numeros de distribuidor por distribuidor"',
+  'INCLUIR:',
+  '  "Carlos realizara empalme con Joana para explicarle el flujo del proyecto"',
+  '  "Oscar confirmara cuales proyectos recibio y comenzara pruebas esta semana"',
+  '  "Informar al equipo cuales proyectos fueron cargados para que Oscar confirme y comience pruebas"',
   '',
-  'DESCARTAR: vagas o sin objeto claro.',
+  'DESCARTAR: vagas sin resultado especifico.',
   '  NO: "Revisar" / "Coordinar" / "Hacer seguimiento" / "Ver el tema"',
   '',
-  'Campos obligatorios por tarea:',
-  '  - descripcion: la accion completa en una oracion clara',
-  '  - asunto: titulo de maximo 8 palabras que identifique la tarea',
-  '  - detalle: contexto completo — que se discutio, por que importa,',
-  '             datos especificos mencionados en la reunion',
+  'Por cada tarea:',
+  '  - asunto: titulo maximo 8 palabras que identifique la tarea',
+  '  - descripcion: 1 oracion completa con sujeto + verbo + objeto especifico',
+  '  - detalle: parrafo con TODO el contexto — por que es necesaria, que debe incluir, dependencias, datos especificos de la reunion',
   '  - responsable: nombre exacto si se menciono, vacio si no',
-  `  - fecha_compromiso: SOLO una fecha en formato AAAA-MM-DD (dias habiles desde ${fechaDef}). NUNCA texto largo ni frases.`,
-  '  - prioridad: 3=Alta si es urgente o bloquea otras tareas, 2=Media, 1=Baja',
-  '  - tipo_tarea: "e" si involucra cliente o externos, "i" si es interna',
-  '  - IDs: 001, 002, 003... Sin limite de cantidad.',
+  `  - fecha_compromiso: calcular en dias habiles desde ${fechaDef}. Usar fecha especifica si se menciono.`,
+  '  - prioridad: 3=Alta (urgente o bloquea otras tareas), 2=Media, 1=Baja',
+  '  - tipo_tarea: "e"=involucra cliente o externos, "i"=interna del equipo',
+  '  - IDs: 001, 002... sin limite de cantidad',
   '',
-  `--- tareas_anteriores ---`,
   tareasAnt.length
-    ? `Incluye las ${tareasAnt.length} tareas anteriores. Actualiza el estado si se menciono avance.`
-    : 'Array vacio []',
+    ? `--- tareas_anteriores ---\nIncluye las ${tareasAnt.length} tareas anteriores con estado actualizado si se menciono avance.`
+    : '--- tareas_anteriores ---\n[]',
   '',
   '--- observaciones_generales ---',
-  'Riesgos, dependencias entre tareas, acuerdos de contexto, informacion',
-  'relevante que no es tarea pero impacta el proyecto. Vacio si no hay nada.',
+  'Riesgos, dependencias entre tareas, acuerdos de contexto. Vacio si no hay nada relevante.',
   '',
-  '=== FORMATO ===',
-  'SOLO JSON valido. Sin texto antes ni despues. Sin markdown.',
+  '=== FORMATO — SOLO JSON VALIDO, SIN TEXTO NI MARKDOWN ===',
   `{"identificacion":{"cliente":"","proyecto":"","fecha":"","hora_inicio":"","hora_fin":"","responsable":"","participantes":[]},"tareas_anteriores":[],"tareas_nuevas":[{"id":"001","descripcion":"","asunto":"","detalle":"","responsable":"","fecha_compromiso":"${fechaDef}","prioridad":2,"tipo_tarea":"i"}],"resumen_reunion":"","observaciones_generales":""}`,
 ].join('\n');
 
@@ -1187,6 +1209,151 @@ app.put('/admin/settings', requireRole('superadmin'), async (req, res) => {
       [req.user.company_id, safe]
     );
     res.json({ ok: true, prompt_context: safe });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// =============================================================================
+// PROYECTOS — base de nombres reutilizables por empresa
+// =============================================================================
+app.get('/admin/projects', async (req, res) => {
+  try {
+    const [r] = await db.execute(
+      'SELECT * FROM projects WHERE company_id=? AND active=1 ORDER BY name',
+      [req.user.company_id]
+    );
+    res.json(r);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/admin/projects', async (req, res) => {
+  const { name, cliente='' } = req.body;
+  if (!name?.trim()) return res.status(400).json({ error: 'Nombre requerido' });
+  try {
+    const [r] = await db.execute(
+      'INSERT INTO projects (company_id,name,cliente) VALUES (?,?,?)',
+      [req.user.company_id, name.trim(), cliente.trim()]
+    );
+    res.json({ id: r.insertId, name: name.trim(), cliente: cliente.trim() });
+  } catch(e) {
+    if (e.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Ya existe ese proyecto' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/admin/projects/:id', async (req, res) => {
+  try {
+    await db.execute('UPDATE projects SET active=0 WHERE id=? AND company_id=?', [req.params.id, req.user.company_id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// =============================================================================
+// API KEYS — integracion con sistemas externos
+// =============================================================================
+const crypto2 = require('crypto');
+
+const apiKeyAuth = async (req, res, next) => {
+  const key = req.headers['x-api-key'];
+  if (!key) return res.status(401).json({ error: 'X-API-Key requerido' });
+  const hash = crypto2.createHash('sha256').update(key).digest('hex');
+  try {
+    const [[r]] = await db.execute(
+      'SELECT id,company_id FROM api_keys WHERE key_hash=? AND active=1', [hash]
+    );
+    if (!r) return res.status(403).json({ error: 'API key invalida o revocada' });
+    await db.execute('UPDATE api_keys SET last_used_at=NOW() WHERE id=?', [r.id]);
+    req.apiCompanyId = r.company_id;
+    next();
+  } catch(e) { res.status(500).json({ error: e.message }); }
+};
+
+// Generar nueva API key
+app.post('/admin/api-keys', requireRole('superadmin','admin'), async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: 'Nombre requerido' });
+    const rawKey  = 'ak_' + crypto2.randomBytes(24).toString('hex');
+    const hash    = crypto2.createHash('sha256').update(rawKey).digest('hex');
+    const prefix  = rawKey.slice(0, 12);
+    await db.execute(
+      'INSERT INTO api_keys (company_id,name,key_hash,key_prefix) VALUES (?,?,?,?)',
+      [req.user.company_id, name.trim(), hash, prefix]
+    );
+    // La key completa solo se muestra una vez — no se puede recuperar después
+    res.json({ key: rawKey, prefix, name: name.trim(), warning: 'Guarda esta key ahora — no se puede ver de nuevo' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Listar API keys (sin mostrar el secreto)
+app.get('/admin/api-keys', requireRole('superadmin','admin'), async (req, res) => {
+  try {
+    const [r] = await db.execute(
+      'SELECT id,name,key_prefix,active,created_at,last_used_at FROM api_keys WHERE company_id=? ORDER BY created_at DESC',
+      [req.user.company_id]
+    );
+    res.json(r);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Revocar API key
+app.delete('/admin/api-keys/:id', requireRole('superadmin','admin'), async (req, res) => {
+  try {
+    await db.execute('UPDATE api_keys SET active=0 WHERE id=? AND company_id=?', [req.params.id, req.user.company_id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// =============================================================================
+// INTEGRATION API — endpoints para sistemas externos (autenticados con API key)
+// =============================================================================
+app.get('/integration/meetings', apiKeyAuth, async (req, res) => {
+  try {
+    const { desde, hasta, cliente, proyecto } = req.query;
+    let sql = `SELECT m.id,m.cliente,m.proyecto,m.responsable,m.started_at,m.ended_at,m.status,
+               m.participantes,m.approved_at FROM meetings m WHERE m.company_id=?`;
+    const p = [req.apiCompanyId];
+    if (desde)    { sql += ' AND m.started_at>=?'; p.push(desde); }
+    if (hasta)    { sql += ' AND m.started_at<=?'; p.push(hasta); }
+    if (cliente)  { sql += ' AND LOWER(m.cliente)=LOWER(?)'; p.push(cliente); }
+    if (proyecto) { sql += ' AND LOWER(m.proyecto)=LOWER(?)'; p.push(proyecto); }
+    sql += ' ORDER BY m.started_at DESC LIMIT 100';
+    const [r] = await db.execute(sql, p);
+    res.json(r);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/integration/tareas', apiKeyAuth, async (req, res) => {
+  try {
+    const { desde, hasta, estado_tarea, responsable } = req.query;
+    let sql = `SELECT t.*,m.cliente,m.proyecto,m.started_at FROM tareas t
+               JOIN meetings m ON m.id=t.meeting_id WHERE m.company_id=?`;
+    const p = [req.apiCompanyId];
+    if (desde)        { sql += ' AND m.started_at>=?'; p.push(desde); }
+    if (hasta)        { sql += ' AND m.started_at<=?'; p.push(hasta); }
+    if (estado_tarea) { sql += ' AND t.estado_tarea=?'; p.push(estado_tarea); }
+    if (responsable)  { sql += ' AND LOWER(t.responsable)=LOWER(?)'; p.push(responsable); }
+    sql += ' ORDER BY m.started_at DESC,t.id LIMIT 500';
+    const [r] = await db.execute(sql, p);
+    res.json(r);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/integration/meetings/:id/tareas', apiKeyAuth, async (req, res) => {
+  try {
+    const [[m]] = await db.execute('SELECT company_id FROM meetings WHERE id=?', [req.params.id]);
+    if (!m || m.company_id !== req.apiCompanyId) return res.status(403).json({ error: 'Sin acceso' });
+    const [r] = await db.execute('SELECT * FROM tareas WHERE meeting_id=? ORDER BY tipo DESC,id', [req.params.id]);
+    res.json(r);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/integration/meetings/:id/acta', apiKeyAuth, async (req, res) => {
+  try {
+    const [[m]] = await db.execute('SELECT company_id FROM meetings WHERE id=?', [req.params.id]);
+    if (!m || m.company_id !== req.apiCompanyId) return res.status(403).json({ error: 'Sin acceso' });
+    const [[a]] = await db.execute('SELECT acta_json FROM actas WHERE meeting_id=?', [req.params.id]);
+    if (!a) return res.status(404).json({ error: 'Acta no encontrada' });
+    res.json(JSON.parse(a.acta_json));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
