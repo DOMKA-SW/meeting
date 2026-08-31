@@ -84,23 +84,21 @@ export default function TareasGlobal() {
     setSaving(false);
   };
 
-  // Descargar Excel con filtros actuales
+  // Descargar CSV (separado por ";", se abre directo en Excel) con filtros actuales
   const descargarExcel = async () => {
     const token = localStorage.getItem('auth_token');
-    const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/tareas/excel`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        // Pide explícitamente xlsx; si el backend sigue devolviendo CSV hay que
-        // corregir el endpoint /tareas/excel para que genere un .xlsx real
-        // (p.ej. con exceljs) en lugar de un CSV renombrado.
-        Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      },
+    const params = new URLSearchParams();
+    if (filtroDesde) params.set('desde', filtroDesde);
+    if (filtroHasta) params.set('hasta', filtroHasta);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/tareas/excel${qs}`, {
+      headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) { alert('Error al descargar'); return; }
     const blob = await res.blob();
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    a.href = url; a.download = `Tareas_${new Date().toISOString().split('T')[0]}.xlsx`;
+    a.href = url; a.download = `Tareas_${new Date().toISOString().split('T')[0]}.csv`;
     a.click(); URL.revokeObjectURL(url);
   };
 
