@@ -31,6 +31,7 @@ import UsersAdmin          from './components/UsersAdmin';
 import ClientPortal        from './components/ClientPortal';
 import Settings             from './components/Settings';
 import TareasGlobal         from './components/TareasGlobal';
+import ProjectsAdmin        from './components/ProjectsAdmin';
 import './App.css';
 
 // -----------------------------------------------------------------------------
@@ -53,6 +54,7 @@ function SidebarNav() {
     { icon: '✍️',  label: 'Ingresar Texto',   path: '/manual'  },
     { icon: '📋',  label: 'Reuniones',         path: '/meetings'},
     { icon: '✅',  label: 'Tareas',             path: '/tareas'  },
+    { icon: '📁',  label: 'Proyectos',          path: '/projects'},
     ...(canManage ? [
       { icon: '👥', label: 'Equipo',            path: '/users'    },
       { icon: '🏢', label: 'Clientes / Portal', path: '/clients'  },
@@ -193,6 +195,7 @@ function AppLayout() {
             <Route path="/meetings/:id" element={<MeetingDetail />} />
             {/* Rutas protegidas por rol — solo admin y superadmin */}
             <Route path="/tareas"   element={<TareasGlobal />} />
+            <Route path="/projects" element={<ProjectsAdmin />} />
             <Route path="/users"    element={<AdminRoute><UsersAdmin /></AdminRoute>} />
             <Route path="/clients"  element={<AdminRoute><ClientsAdmin /></AdminRoute>} />
             {/* Configuracion — solo superadmin */}
