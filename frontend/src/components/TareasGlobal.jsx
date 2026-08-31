@@ -22,18 +22,23 @@ export default function TareasGlobal() {
   const [filtroPrio, setFiltroPrio]       = useState('');
   const [filtroTipo, setFiltroTipo]       = useState('');
   const [filtroReunion, setFiltroReunion] = useState('');
+  const [filtroDesde, setFiltroDesde]     = useState('');
+  const [filtroHasta, setFiltroHasta]     = useState('');
   const [editando, setEditando]   = useState(null); // { idx, field, value }
   const [saving, setSaving]       = useState(false);
 
   const fetchTareas = useCallback(async () => {
     try {
-      const r = await apiFetch('/tareas');
+      const params = new URLSearchParams();
+      if (filtroDesde) params.set('desde', filtroDesde);
+      if (filtroHasta) params.set('hasta', filtroHasta);
+      const r = await apiFetch(`/tareas${params.toString() ? '?' + params.toString() : ''}`);
       if (r.ok) setTareas(await r.json());
       setLoading(false);
     } catch { setLoading(false); }
   }, []);
 
-  useEffect(() => { fetchTareas(); }, [fetchTareas]);
+  useEffect(() => { fetchTareas(); }, [fetchTareas, filtroDesde, filtroHasta]);
 
   // Lista única de reuniones para el filtro
   const reuniones = [...new Map(tareas.map(t => [t.meeting_uuid, { id: t.meeting_uuid, label: `${t.cliente || '—'} · ${t.proyecto || '—'}` }])).values()];
@@ -84,9 +89,9 @@ export default function TareasGlobal() {
     a.click(); URL.revokeObjectURL(url);
   };
 
-  const limpiarFiltros = () => { setSearch(''); setFiltroEstado(''); setFiltroPrio(''); setFiltroTipo(''); setFiltroReunion(''); };
+  const limpiarFiltros = () => { setSearch(''); setFiltroEstado(''); setFiltroPrio(''); setFiltroTipo(''); setFiltroReunion(''); setFiltroDesde(''); setFiltroHasta(''); };
 
-  const hayFiltros = search || filtroEstado || filtroPrio || filtroTipo || filtroReunion;
+  const hayFiltros = search || filtroEstado || filtroPrio || filtroTipo || filtroReunion || filtroDesde || filtroHasta;
 
   if (loading) return <div style={{ padding: 40 }}>Cargando tareas...</div>;
 
@@ -132,6 +137,14 @@ export default function TareasGlobal() {
           <option value=''>Todas las reuniones</option>
           {reuniones.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
         </select>
+        <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+          <label style={{ fontSize:12, color:'#666', whiteSpace:'nowrap' }}>Desde:</label>
+          <input type='date' value={filtroDesde} onChange={e=>setFiltroDesde(e.target.value)} style={selStyle} />
+        </div>
+        <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+          <label style={{ fontSize:12, color:'#666', whiteSpace:'nowrap' }}>Hasta:</label>
+          <input type='date' value={filtroHasta} onChange={e=>setFiltroHasta(e.target.value)} style={selStyle} />
+        </div>
       </div>
 
       {/* Tabla */}
