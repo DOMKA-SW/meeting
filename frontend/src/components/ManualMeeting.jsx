@@ -80,8 +80,10 @@ export default function ManualMeeting() {
   const [texto, setTexto]                 = useState('');
   const [form, setForm]                   = useState({ cliente:'', proyecto:'', responsable:'', participantes:'', linked_meeting_id:'', terminology:'', invited_user_ids:[] });
   const [companyUsers, setCompanyUsers]   = useState([]);
+  const [projects, setProjects]           = useState([]);
   useEffect(() => {
     apiFetch('/admin/users/company').then(r=>r.ok&&r.json()).then(d=>d&&setCompanyUsers(d)).catch(()=>{});
+    apiFetch('/admin/projects').then(r=>r.ok&&r.json()).then(d=>d&&setProjects(d)).catch(()=>{});
   }, []);
   const [fecha, setFecha]                 = useState('');
   const [horaInicio, setHoraInicio]       = useState('');
@@ -91,6 +93,25 @@ export default function ManualMeeting() {
   const [charCount, setCharCount]         = useState(0);
 
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
+
+  // Si el proyecto escrito no existe en el catalogo de la empresa, lo crea
+  // para que quede disponible (autocompletar) en futuras reuniones.
+  const guardarProyectoSiEsNuevo = async () => {
+    const nombre = form.proyecto.trim();
+    if (!nombre) return;
+    const yaExiste = projects.some(p => p.name.toLowerCase() === nombre.toLowerCase());
+    if (yaExiste) return;
+    try {
+      const r = await apiFetch('/admin/projects', {
+        method: 'POST',
+        body: JSON.stringify({ name: nombre, cliente: form.cliente.trim() })
+      });
+      if (r.ok) {
+        const nuevo = await r.json();
+        setProjects(prev => [...prev, nuevo].sort((a,b)=>a.name.localeCompare(b.name)));
+      }
+    } catch { /* si falla, no bloquea el guardado de la reunion */ }
+  };
 
   const handleTextoChange = (e) => {
     setTexto(e.target.value);
@@ -109,6 +130,7 @@ export default function ManualMeeting() {
       return setError('Necesitas al menos 10 palabras de contenido.');
     setError(''); setProcessing(true);
     try {
+      await guardarProyectoSiEsNuevo();
       const participantesArr = form.participantes
         ? form.participantes.split(/[,;]/).map(p=>p.trim()).filter(Boolean)
         : [];
@@ -160,10 +182,19 @@ export default function ManualMeeting() {
           {[['cliente','Cliente'],['proyecto','Proyecto']].map(([f,l]) => (
             <div key={f}>
               <label style={labelStyle}>{l}</label>
-              <input style={inputStyle} value={form[f]} onChange={e=>set(f,e.target.value)} placeholder={l} />
+              <input
+                style={inputStyle}
+                value={form[f]}
+                onChange={e=>set(f,e.target.value)}
+                placeholder={l}
+                list={f==='proyecto' ? 'proyectos-catalogo' : undefined}
+              />
             </div>
           ))}
         </div>
+        <datalist id="proyectos-catalogo">
+          {projects.map(p => <option key={p.id} value={p.name} />)}
+        </datalist>
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:12 }}>
           <div>
             <label style={labelStyle}>Responsable</label>
