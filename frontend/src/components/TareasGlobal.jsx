@@ -49,6 +49,13 @@ export default function TareasGlobal() {
     if (filtroPrio    && String(t.prioridad)    !== filtroPrio)   return false;
     if (filtroTipo    && t.tipo_tarea           !== filtroTipo)   return false;
     if (filtroReunion && t.meeting_uuid         !== filtroReunion) return false;
+    if (filtroDesde || filtroHasta) {
+      const fechaTarea = t.fecha_compromiso || t.started_at;
+      if (!fechaTarea) return false;
+      const f = fechaTarea.slice(0, 10); // normaliza a 'YYYY-MM-DD'
+      if (filtroDesde && f < filtroDesde) return false;
+      if (filtroHasta && f > filtroHasta) return false;
+    }
     if (search) {
       const q = search.toLowerCase();
       return (t.asunto||'').toLowerCase().includes(q) ||
@@ -80,12 +87,20 @@ export default function TareasGlobal() {
   // Descargar Excel con filtros actuales
   const descargarExcel = async () => {
     const token = localStorage.getItem('auth_token');
-    const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/tareas/excel`, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/tareas/excel`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        // Pide explícitamente xlsx; si el backend sigue devolviendo CSV hay que
+        // corregir el endpoint /tareas/excel para que genere un .xlsx real
+        // (p.ej. con exceljs) en lugar de un CSV renombrado.
+        Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      },
+    });
     if (!res.ok) { alert('Error al descargar'); return; }
     const blob = await res.blob();
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    a.href = url; a.download = `Tareas_${new Date().toISOString().split('T')[0]}.csv`;
+    a.href = url; a.download = `Tareas_${new Date().toISOString().split('T')[0]}.xlsx`;
     a.click(); URL.revokeObjectURL(url);
   };
 
