@@ -1166,6 +1166,82 @@ app.post('/client/actas/:mid/approve', clientAuth, async (req, res) => {
 });
 
 // =============================================================================
+// INTEGRATION API — autenticacion exclusiva mediante API Key
+// Estas rutas deben estar ANTES de authMiddleware porque no usan JWT.
+// =============================================================================
+
+const crypto2 = require('crypto');
+
+const apiKeyAuth = async (req, res, next) => {
+  const key = req.headers['x-api-key'];
+  if (!key) return res.status(401).json({ error: 'X-API-Key requerido' });
+  const hash = crypto2.createHash('sha256').update(key).digest('hex');
+  try {
+    const [[r]] = await db.execute(
+      'SELECT id,company_id FROM api_keys WHERE key_hash=? AND active=1', [hash]
+    );
+    if (!r) return res.status(403).json({ error: 'API key invalida o revocada' });
+    await db.execute('UPDATE api_keys SET last_used_at=NOW() WHERE id=?', [r.id]);
+    req.apiCompanyId = r.company_id;
+    next();
+  } catch(e) { res.status(500).json({ error: e.message }); }
+};
+
+// =============================================================================
+// INTEGRATION API — endpoints para sistemas externos (autenticados con API key)
+// =============================================================================
+app.get('/integration/meetings', apiKeyAuth, async (req, res) => {
+  try {
+    const { desde, hasta, cliente, proyecto } = req.query;
+    let sql = `SELECT m.id,m.cliente,m.proyecto,m.responsable,m.started_at,m.ended_at,m.status,
+               m.participantes,m.approved_at FROM meetings m WHERE m.company_id=?`;
+    const p = [req.apiCompanyId];
+    if (desde)    { sql += ' AND m.started_at>=?'; p.push(desde); }
+    if (hasta)    { sql += ' AND m.started_at<=?'; p.push(hasta); }
+    if (cliente)  { sql += ' AND LOWER(m.cliente)=LOWER(?)'; p.push(cliente); }
+    if (proyecto) { sql += ' AND LOWER(m.proyecto)=LOWER(?)'; p.push(proyecto); }
+    sql += ' ORDER BY m.started_at DESC LIMIT 100';
+    const [r] = await db.execute(sql, p);
+    res.json(r);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/integration/tareas', apiKeyAuth, async (req, res) => {
+  try {
+    const { desde, hasta, estado_tarea, responsable } = req.query;
+    let sql = `SELECT t.*,m.cliente,m.proyecto,m.started_at FROM tareas t
+               JOIN meetings m ON m.id=t.meeting_id WHERE m.company_id=?`;
+    const p = [req.apiCompanyId];
+    if (desde)        { sql += ' AND m.started_at>=?'; p.push(desde); }
+    if (hasta)        { sql += ' AND m.started_at<=?'; p.push(hasta); }
+    if (estado_tarea) { sql += ' AND t.estado_tarea=?'; p.push(estado_tarea); }
+    if (responsable)  { sql += ' AND LOWER(t.responsable)=LOWER(?)'; p.push(responsable); }
+    sql += ' ORDER BY m.started_at DESC,t.id LIMIT 500';
+    const [r] = await db.execute(sql, p);
+    res.json(r);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/integration/meetings/:id/tareas', apiKeyAuth, async (req, res) => {
+  try {
+    const [[m]] = await db.execute('SELECT company_id FROM meetings WHERE id=?', [req.params.id]);
+    if (!m || m.company_id !== req.apiCompanyId) return res.status(403).json({ error: 'Sin acceso' });
+    const [r] = await db.execute('SELECT * FROM tareas WHERE meeting_id=? ORDER BY tipo DESC,id', [req.params.id]);
+    res.json(r);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/integration/meetings/:id/acta', apiKeyAuth, async (req, res) => {
+  try {
+    const [[m]] = await db.execute('SELECT company_id FROM meetings WHERE id=?', [req.params.id]);
+    if (!m || m.company_id !== req.apiCompanyId) return res.status(403).json({ error: 'Sin acceso' });
+    const [[a]] = await db.execute('SELECT acta_json FROM actas WHERE meeting_id=?', [req.params.id]);
+    if (!a) return res.status(404).json({ error: 'Acta no encontrada' });
+    res.json(JSON.parse(a.acta_json));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// =============================================================================
 // A PARTIR DE AQUI TODAS LAS RUTAS REQUIEREN JWT VALIDO
 // app.use(authMiddleware) aplica la verificacion a todos los endpoints
 // que se definan despues de esta linea.
@@ -1249,23 +1325,8 @@ app.delete('/admin/projects/:id', async (req, res) => {
 
 // =============================================================================
 // API KEYS — integracion con sistemas externos
+// (apiKeyAuth y las rutas /integration/* viven mas arriba, antes de authMiddleware)
 // =============================================================================
-const crypto2 = require('crypto');
-
-const apiKeyAuth = async (req, res, next) => {
-  const key = req.headers['x-api-key'];
-  if (!key) return res.status(401).json({ error: 'X-API-Key requerido' });
-  const hash = crypto2.createHash('sha256').update(key).digest('hex');
-  try {
-    const [[r]] = await db.execute(
-      'SELECT id,company_id FROM api_keys WHERE key_hash=? AND active=1', [hash]
-    );
-    if (!r) return res.status(403).json({ error: 'API key invalida o revocada' });
-    await db.execute('UPDATE api_keys SET last_used_at=NOW() WHERE id=?', [r.id]);
-    req.apiCompanyId = r.company_id;
-    next();
-  } catch(e) { res.status(500).json({ error: e.message }); }
-};
 
 // Generar nueva API key
 app.post('/admin/api-keys', requireRole('superadmin','admin'), async (req, res) => {
@@ -1300,60 +1361,6 @@ app.delete('/admin/api-keys/:id', requireRole('superadmin','admin'), async (req,
   try {
     await db.execute('UPDATE api_keys SET active=0 WHERE id=? AND company_id=?', [req.params.id, req.user.company_id]);
     res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// =============================================================================
-// INTEGRATION API — endpoints para sistemas externos (autenticados con API key)
-// =============================================================================
-app.get('/integration/meetings', apiKeyAuth, async (req, res) => {
-  try {
-    const { desde, hasta, cliente, proyecto } = req.query;
-    let sql = `SELECT m.id,m.cliente,m.proyecto,m.responsable,m.started_at,m.ended_at,m.status,
-               m.participantes,m.approved_at FROM meetings m WHERE m.company_id=?`;
-    const p = [req.apiCompanyId];
-    if (desde)    { sql += ' AND m.started_at>=?'; p.push(desde); }
-    if (hasta)    { sql += ' AND m.started_at<=?'; p.push(hasta); }
-    if (cliente)  { sql += ' AND LOWER(m.cliente)=LOWER(?)'; p.push(cliente); }
-    if (proyecto) { sql += ' AND LOWER(m.proyecto)=LOWER(?)'; p.push(proyecto); }
-    sql += ' ORDER BY m.started_at DESC LIMIT 100';
-    const [r] = await db.execute(sql, p);
-    res.json(r);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/integration/tareas', apiKeyAuth, async (req, res) => {
-  try {
-    const { desde, hasta, estado_tarea, responsable } = req.query;
-    let sql = `SELECT t.*,m.cliente,m.proyecto,m.started_at FROM tareas t
-               JOIN meetings m ON m.id=t.meeting_id WHERE m.company_id=?`;
-    const p = [req.apiCompanyId];
-    if (desde)        { sql += ' AND m.started_at>=?'; p.push(desde); }
-    if (hasta)        { sql += ' AND m.started_at<=?'; p.push(hasta); }
-    if (estado_tarea) { sql += ' AND t.estado_tarea=?'; p.push(estado_tarea); }
-    if (responsable)  { sql += ' AND LOWER(t.responsable)=LOWER(?)'; p.push(responsable); }
-    sql += ' ORDER BY m.started_at DESC,t.id LIMIT 500';
-    const [r] = await db.execute(sql, p);
-    res.json(r);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/integration/meetings/:id/tareas', apiKeyAuth, async (req, res) => {
-  try {
-    const [[m]] = await db.execute('SELECT company_id FROM meetings WHERE id=?', [req.params.id]);
-    if (!m || m.company_id !== req.apiCompanyId) return res.status(403).json({ error: 'Sin acceso' });
-    const [r] = await db.execute('SELECT * FROM tareas WHERE meeting_id=? ORDER BY tipo DESC,id', [req.params.id]);
-    res.json(r);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/integration/meetings/:id/acta', apiKeyAuth, async (req, res) => {
-  try {
-    const [[m]] = await db.execute('SELECT company_id FROM meetings WHERE id=?', [req.params.id]);
-    if (!m || m.company_id !== req.apiCompanyId) return res.status(403).json({ error: 'Sin acceso' });
-    const [[a]] = await db.execute('SELECT acta_json FROM actas WHERE meeting_id=?', [req.params.id]);
-    if (!a) return res.status(404).json({ error: 'Acta no encontrada' });
-    res.json(JSON.parse(a.acta_json));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
