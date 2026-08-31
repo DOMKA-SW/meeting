@@ -1625,7 +1625,7 @@ app.get('/meetings/:id/tareas/excel', async (req, res) => {
       PRIO[t.prioridad]||'', t.tipo_tarea==='e'?'Externa':'Interna',
       t.requerimiento_id||'', t.fecha_compromiso||'', t.date_init||'', t.date_end||''
     ]);
-    const csv = [head,...data].map(r=>r.map(v=>`"${String(v||'').replace(/"/g,'""')}"`).join(',')).join('\r\n');
+    const csv = [head,...data].map(r=>r.map(v=>`"${String(v||'').replace(/"/g,'""')}"`).join(';')).join('\r\n');
     const fecha = m?.started_at ? new Date(m.started_at).toISOString().split('T')[0] : 'sin-fecha';
     const nombre = `Tareas_${(m?.cliente||'').replace(/[^a-z0-9]/gi,'_')}_${(m?.proyecto||'').replace(/[^a-z0-9]/gi,'_')}_${fecha}.csv`;
     res.setHeader('Content-Type','text/csv;charset=utf-8');
@@ -1637,12 +1637,15 @@ app.get('/meetings/:id/tareas/excel', async (req, res) => {
 // ─── Excel tareas empresa completa ────────────────────────────────────────────
 app.get('/tareas/excel', async (req, res) => {
   try {
-    const [rows] = await db.execute(
-      `SELECT t.*,m.cliente,m.proyecto,m.started_at FROM tareas t
+    const { desde, hasta } = req.query;
+    let sql = `SELECT t.*,m.cliente,m.proyecto,m.started_at FROM tareas t
        JOIN meetings m ON m.id=t.meeting_id
-       WHERE m.company_id=? ORDER BY m.started_at DESC,t.tipo DESC,t.id`,
-      [req.user.company_id]
-    );
+       WHERE m.company_id=?`;
+    const params = [req.user.company_id];
+    if (desde) { sql += ' AND t.fecha_compromiso >= ?'; params.push(desde); }
+    if (hasta) { sql += ' AND t.fecha_compromiso <= ?'; params.push(hasta); }
+    sql += ' ORDER BY m.started_at DESC,t.tipo DESC,t.id';
+    const [rows] = await db.execute(sql, params);
     const ESTADOS = {1:'Sin iniciar',2:'En progreso',3:'En revisión',4:'Finalizada',5:'Planeación',7:'Respuesta Cliente',8:'Pend otros procesos'};
     const PRIO    = {1:'Baja',2:'Media',3:'Alta'};
     const head = ['Reunión','Cliente','Proyecto','ID','Tipo','Asunto','Descripción','Detalle','Responsable','Asignado a','Estado','Prioridad','Tipo Tarea','Req ID','Fecha Compromiso','Fecha Inicio','Fecha Fin'];
@@ -1657,7 +1660,7 @@ app.get('/tareas/excel', async (req, res) => {
       t.tipo_tarea==='e'?'Externa':'Interna',
       t.requerimiento_id||'', t.fecha_compromiso||'', t.date_init||'', t.date_end||''
     ]);
-    const csv = [head,...data].map(r=>r.map(v=>`"${String(v||'').replace(/"/g,'""')}"`).join(',')).join('\r\n');
+    const csv = [head,...data].map(r=>r.map(v=>`"${String(v||'').replace(/"/g,'""')}"`).join(';')).join('\r\n');
     const hoy = new Date().toISOString().split('T')[0];
     res.setHeader('Content-Type','text/csv;charset=utf-8');
     res.setHeader('Content-Disposition',`attachment; filename="Tareas_Empresa_${hoy}.csv"`);
