@@ -54,8 +54,10 @@ const inputStyle = { width:'100%', padding:'8px 12px', borderRadius:6, border:'1
 export default function RecordMeeting() {
   const navigate = useNavigate();
   const [companyUsers, setCompanyUsers] = useState([]);
+  const [projects, setProjects] = useState([]);
   useEffect(() => {
     apiFetch('/admin/users/company').then(r=>r.ok&&r.json()).then(d=>d&&setCompanyUsers(d)).catch(()=>{});
+    apiFetch('/admin/projects').then(r=>r.ok&&r.json()).then(d=>d&&setProjects(d)).catch(()=>{});
   }, []);
   const {
     isRecording, form, setForm, duration, chunkNumber, progress,
