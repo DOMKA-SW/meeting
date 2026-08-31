@@ -68,7 +68,26 @@ export default function RecordMeeting() {
 
   const [selectedMode, setSelectedMode] = useState('audio'); // 'audio' | 'video'
 
-  const handleStart = async () => { setErrorMsg(''); await startMeeting(selectedMode); };
+  // Si el proyecto escrito no existe en el catalogo de la empresa, lo crea
+  // para que quede disponible (autocompletar) en futuras reuniones.
+  const guardarProyectoSiEsNuevo = async () => {
+    const nombre = form.proyecto.trim();
+    if (!nombre) return;
+    const yaExiste = projects.some(p => p.name.toLowerCase() === nombre.toLowerCase());
+    if (yaExiste) return;
+    try {
+      const r = await apiFetch('/admin/projects', {
+        method: 'POST',
+        body: JSON.stringify({ name: nombre, cliente: form.cliente.trim() })
+      });
+      if (r.ok) {
+        const nuevo = await r.json();
+        setProjects(prev => [...prev, nuevo].sort((a,b)=>a.name.localeCompare(b.name)));
+      }
+    } catch { /* si falla, no bloquea el flujo de grabacion */ }
+  };
+
+  const handleStart = async () => { setErrorMsg(''); await guardarProyectoSiEsNuevo(); await startMeeting(selectedMode); };
   const handleStop  = async () => {
     const mid = await stopMeeting();
     if (mid) { resetMeetingForm(); navigate('/meetings'); }
@@ -99,10 +118,19 @@ export default function RecordMeeting() {
               {[['cliente','Cliente','Empresa / cliente'],['proyecto','Proyecto','Nombre del proyecto']].map(([f,l,p]) => (
                 <div key={f}>
                   <label style={labelStyle}>{l}</label>
-                  <input style={inputStyle} value={form[f]} onChange={e => setForm(frm=>({...frm,[f]:e.target.value}))} placeholder={p} />
+                  <input
+                    style={inputStyle}
+                    value={form[f]}
+                    onChange={e => setForm(frm=>({...frm,[f]:e.target.value}))}
+                    placeholder={p}
+                    list={f==='proyecto' ? 'proyectos-catalogo' : undefined}
+                  />
                 </div>
               ))}
             </div>
+            <datalist id="proyectos-catalogo">
+              {projects.map(p => <option key={p.id} value={p.name} />)}
+            </datalist>
             <div style={{ marginBottom:12 }}>
               <label style={labelStyle}>Responsable / moderador</label>
               <input style={inputStyle} value={form.responsable} onChange={e => setForm(f=>({...f,responsable:e.target.value}))} placeholder="Quien modera" />
